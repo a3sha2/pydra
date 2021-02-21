@@ -5,6 +5,13 @@ Pydra is a rewrite of the Nipype engine with mapping and joining as
 first-class operations. It forms the core of the Nipype 2.0 ecosystem.
 
 """
+# This call enables pydra.tasks to be used as a namespace package when installed
+# in editable mode. In normal installations it has no effect.
+__path__ = __import__("pkgutil").extend_path(__path__, __name__)
+
+import logging
+
+logger = logging.getLogger("pydra")
 from ._version import get_versions
 
 __version__ = get_versions()["version"]
@@ -14,54 +21,11 @@ from .engine import Submitter, Workflow, AuditFlag, ShellCommandTask, DockerTask
 from . import mark
 
 
-def check_latest_version(raise_exception=False):
-    """
-    Check for the latest version of the library.
+def check_latest_version():
 
-    Parameters
-    ----------
-    raise_exception: :obj:`bool`
-        Raise a RuntimeError if a bad version is being used
-
-    """
     import etelemetry
-    import logging
-    from pkg_resources import parse_version
 
-    logger = logging.getLogger("pydra")
-
-    INIT_MSG = "Running {packname} version {version} (latest: {latest})".format
-
-    latest = {"version": "Unknown", "bad_versions": []}
-    result = None
-    try:
-        result = etelemetry.get_project("nipype/pydra")
-    except Exception as e:
-        logger.warning("Could not check for version updates: \n%s", e)
-    finally:
-        if result:
-            latest.update(**result)
-            if parse_version(__version__) != parse_version(latest["version"]):
-                logger.info(
-                    INIT_MSG(
-                        packname="pydra", version=__version__, latest=latest["version"]
-                    )
-                )
-            if latest["bad_versions"] and any(
-                [
-                    parse_version(__version__) == parse_version(ver)
-                    for ver in latest["bad_versions"]
-                ]
-            ):
-                message = (
-                    "You are using a version of Pydra with a critical "
-                    "bug. Please use a different version."
-                )
-                if raise_exception:
-                    raise RuntimeError(message)
-                else:
-                    logger.critical(message)
-    return latest
+    return etelemetry.check_available_version("nipype/pydra", __version__, lgr=logger)
 
 
 # Run telemetry on import for interactive sessions, such as IPython, Jupyter notebooks, Python REPL
@@ -72,3 +36,13 @@ if not hasattr(__main__, "__file__"):
 
     if TaskBase._etelemetry_version_data is None:
         TaskBase._etelemetry_version_data = check_latest_version()
+
+
+# attr run_validators is set to False, but could be changed using use_validator
+import attr
+
+attr.set_run_validators(False)
+
+
+def set_input_validator(flag=False):
+    attr.set_run_validators(flag)

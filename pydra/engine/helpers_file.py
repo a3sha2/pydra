@@ -7,9 +7,9 @@ import os.path as op
 import re
 import shutil
 import posixpath
-from builtins import str, bytes, open
 import logging
 from pathlib import Path
+import typing as ty
 
 related_filetype_sets = [(".hdr", ".img", ".mat"), (".nii", ".mat"), (".BRIK", ".HEAD")]
 """List of neuroimaging file types that are to be interpreted together."""
@@ -66,57 +66,26 @@ def split_filename(fname):
     return pth, fname, ext
 
 
-def fname_presuffix(fname, prefix="", suffix="", newpath=None, use_ext=True):
-    """
-    Manipulate path and name of input filename.
-
-    Parameters
-    ----------
-    fname : :obj:`str`
-        A filename (may or may not include path)
-    prefix : :obj:`str`
-        Characters to prepend to the filename
-    suffix : :obj:`str`
-        Characters to append to the filename
-    newpath : :obj:`str`
-        Path to replace the path of the input fname
-    use_ext : :obj:`bool`
-        If True (default), appends the extension of the original file
-        to the output name.
-
-    Return
-    ------
-    path : :obj:`str`
-        Absolute path of the modified filename
-
-    Examples
-    --------
-    >>> from pydra.engine.helpers_file import fname_presuffix
-    >>> fname = 'foo.nii.gz'
-    >>> fname_presuffix(fname,'pre','post','/tmp')
-    '/tmp/prefoopost.nii.gz'
-
-    """
-    pth, fname, ext = split_filename(fname)
-    if not use_ext:
-        ext = ""
-
-    # No need for isdefined: bool(Undefined) evaluates to False
-    if newpath:
-        pth = op.abspath(newpath)
-    return op.join(pth, prefix + fname + suffix + ext)
-
-
-def hash_file(afile, chunk_len=8192, crypto=sha256, raise_notfound=True):
+def hash_file(
+    afile, chunk_len=8192, crypto=sha256, raise_notfound=True, precalculated=None
+):
     """Compute hash of a file using 'crypto' module."""
     from .specs import LazyField
 
     if afile is None or isinstance(afile, LazyField) or isinstance(afile, list):
         return None
-    if not os.path.isfile(afile):
+    if not Path(afile).is_file():
         if raise_notfound:
             raise RuntimeError('File "%s" not found.' % afile)
         return None
+
+    # if the path exists already in precalculated
+    # the time of the last modification will be compared
+    # and the precalculated hash value will be used if the file has not change
+    if precalculated and str(Path(afile)) in precalculated:
+        pre_mtime, pre_cont_hash = precalculated[str(Path(afile))]
+        if Path(afile).stat().st_mtime == pre_mtime:
+            return pre_cont_hash
 
     crypto_obj = crypto()
     with open(afile, "rb") as fp:
@@ -125,6 +94,76 @@ def hash_file(afile, chunk_len=8192, crypto=sha256, raise_notfound=True):
             if not data:
                 break
             crypto_obj.update(data)
+
+    cont_hash = crypto_obj.hexdigest()
+    if precalculated is not None:
+        precalculated[str(Path(afile))] = (Path(afile).stat().st_mtime, cont_hash)
+    return cont_hash
+
+
+def hash_dir(
+    dirpath,
+    crypto=sha256,
+    ignore_hidden_files=False,
+    ignore_hidden_dirs=False,
+    raise_notfound=True,
+    precalculated=None,
+):
+    """Compute hash of directory contents.
+
+    This function computes the hash of every file in directory `dirpath` and then
+    computes the hash of that list of hashes to return a single hash value. The
+    directory is traversed recursively.
+
+    Parameters
+    ----------
+    dirpath : :obj:`str`
+        Path to directory.
+    crypto : :obj: `function`
+        cryptographic hash functions
+    ignore_hidden_files : :obj:`bool`
+        If `True`, ignore filenames that begin with `.`.
+    ignore_hidden_dirs : :obj:`bool`
+        If `True`, ignore files in directories that begin with `.`.
+    raise_notfound : :obj:`bool`
+        If `True` and `dirpath` does not exist, raise `FileNotFound` exception. If
+        `False` and `dirpath` does not exist, return `None`.
+
+    Returns
+    -------
+    hash : :obj:`str`
+        Hash of the directory contents.
+    """
+    from .specs import LazyField
+
+    if dirpath is None or isinstance(dirpath, LazyField) or isinstance(dirpath, list):
+        return None
+    if not Path(dirpath).is_dir():
+        if raise_notfound:
+            raise FileNotFoundError(f"Directory {dirpath} not found.")
+        return None
+
+    file_hashes = []
+    for dpath, dirnames, filenames in os.walk(dirpath):
+        # Sort in-place to guarantee order.
+        dirnames.sort()
+        filenames.sort()
+        dpath = Path(dpath)
+        if ignore_hidden_dirs and dpath.name.startswith(".") and str(dpath) != dirpath:
+            continue
+        for filename in filenames:
+            if ignore_hidden_files and filename.startswith("."):
+                continue
+            if not is_existing_file(dpath / filename):
+                file_hashes.append(str(dpath / filename))
+            else:
+                this_hash = hash_file(dpath / filename, precalculated=precalculated)
+                file_hashes.append(this_hash)
+
+    crypto_obj = crypto()
+    for h in file_hashes:
+        crypto_obj.update(h.encode())
+
     return crypto_obj.hexdigest()
 
 
@@ -379,7 +418,7 @@ def get_related_files(filename, include_this_file=True):
         if this_type in type_set:
             for related_type in type_set:
                 if include_this_file or related_type != this_type:
-                    related_files.append(op.join(path, name + related_type))
+                    related_files.append(Path(path) / (name + related_type))
     if not len(related_files):
         related_files = [filename]
     return related_files
@@ -460,25 +499,32 @@ def ensure_list(filename):
 # not sure if this might be useful for Function Task
 def copyfile_input(inputs, output_dir):
     """Implement the base class method."""
-    from .specs import attr_fields, File
+    from .specs import attr_fields, File, MultiInputFile
 
     map_copyfiles = {}
     for fld in attr_fields(inputs):
         copy = fld.metadata.get("copyfile")
-        if copy is not None and fld.type is not File:
+        if copy is not None and fld.type not in [File, MultiInputFile]:
             raise Exception(
                 f"if copyfile set, field has to be a File " f"but {fld.type} provided"
             )
-        if copy in [True, False]:
-            file = getattr(inputs, fld.name)
-            newfile = output_dir.joinpath(Path(getattr(inputs, fld.name)).name)
-            copyfile(file, newfile, copy=copy)
-            map_copyfiles[fld.name] = str(newfile)
+        file = getattr(inputs, fld.name)
+        if copy in [True, False] and file != attr.NOTHING:
+            if isinstance(file, list):
+                map_copyfiles[fld.name] = []
+                for el in file:
+                    newfile = output_dir.joinpath(Path(el).name)
+                    copyfile(el, newfile, copy=copy)
+                    map_copyfiles[fld.name].append(str(newfile))
+            else:
+                newfile = output_dir.joinpath(Path(file).name)
+                copyfile(file, newfile, copy=copy)
+                map_copyfiles[fld.name] = str(newfile)
     return map_copyfiles or None
 
 
 # not sure if this might be useful for Function Task
-def template_update(inputs, map_copyfiles=None):
+def template_update(inputs, output_dir, map_copyfiles=None):
     """
     Update all templates that are present in the input spec.
 
@@ -491,34 +537,169 @@ def template_update(inputs, map_copyfiles=None):
 
     from .specs import attr_fields
 
-    fields = attr_fields(inputs)
-    # TODO: Create a dependency graph first and then traverse it
-    for fld in fields:
-        if getattr(inputs, fld.name) is not attr.NOTHING:
-            continue
-        if fld.metadata.get("output_file_template"):
-            if fld.type is str:
-                value = fld.metadata["output_file_template"].format(**dict_)
-                dict_[fld.name] = str(value)
+    fields_templ = [
+        fld for fld in attr_fields(inputs) if fld.metadata.get("output_file_template")
+    ]
+    for fld in fields_templ:
+        if fld.type not in [str, ty.Union[str, bool]]:
+            raise Exception(
+                f"fields with output_file_template"
+                " has to be a string or Union[str, bool]"
+            )
+        dict_[fld.name] = template_update_single(
+            field=fld, inputs_dict=dict_, output_dir=output_dir
+        )
+    # using is and  == so it covers list and numpy arrays
+    updated_templ_dict = {
+        k: v
+        for k, v in dict_.items()
+        if not (getattr(inputs, k) is v or getattr(inputs, k) == v)
+    }
+    return updated_templ_dict
+
+
+def template_update_single(field, inputs_dict, output_dir=None, spec_type="input"):
+    """Update a single template from the input_spec or output_spec
+    based on the value from inputs_dict
+    (checking the types of the fields, that have "output_file_template)"
+    """
+    from .specs import File, MultiOutputFile, Directory
+
+    if spec_type == "input":
+        if field.type not in [str, ty.Union[str, bool]]:
+            raise Exception(
+                f"fields with output_file_template"
+                "has to be a string or Union[str, bool]"
+            )
+        inp_val_set = inputs_dict[field.name]
+        if inp_val_set is not attr.NOTHING and not isinstance(inp_val_set, (str, bool)):
+            raise Exception(
+                f"{field.name} has to be str or bool, but {inp_val_set} set"
+            )
+        if isinstance(inp_val_set, bool) and field.type is str:
+            raise Exception(
+                f"type of {field.name} is str, consider using Union[str, bool]"
+            )
+    elif spec_type == "output":
+        if field.type not in [File, MultiOutputFile, Directory]:
+            raise Exception(
+                f"output {field.name} should be a File, but {field.type} set as the type"
+            )
+    else:
+        raise Exception(f"spec_type can be input or output, but {spec_type} provided")
+    # for inputs that the value is set (so the template is ignored)
+    if spec_type == "input" and isinstance(inputs_dict[field.name], str):
+        return inputs_dict[field.name]
+    elif spec_type == "input" and inputs_dict[field.name] is False:
+        # if input fld is set to False, the fld shouldn't be used (setting NOTHING)
+        return attr.NOTHING
+    else:  # inputs_dict[field.name] is True or spec_type is output
+        value = _template_formatting(field, inputs_dict)
+        # changing path so it is in the output_dir
+        if output_dir and value is not attr.NOTHING:
+            # should be converted to str, it is also used for input fields that should be str
+            if type(value) is list:
+                return [str(output_dir / Path(val).name) for val in value]
             else:
-                raise Exception(
-                    f"output_file_template metadata for "
-                    "{fld.name} should be a string"
+                return str(output_dir / Path(value).name)
+        else:
+            return value
+
+
+def _template_formatting(field, inputs_dict):
+    """Formatting a single template based on values from inputs_dict.
+    Taking into account that the field with a template can be a MultiOutputFile
+    and the field values needed in the template can be a list -
+    returning a list of formatted templates in that case.
+    """
+    from .specs import MultiOutputFile
+
+    template = field.metadata["output_file_template"]
+    # as default, we assume that keep_extension is True
+    keep_extension = field.metadata.get("keep_extension", True)
+
+    inp_fields = re.findall("{\w+}", template)
+    if len(inp_fields) == 0:
+        return template
+    elif len(inp_fields) == 1:
+        fld_name = inp_fields[0][1:-1]
+        fld_value = inputs_dict[fld_name]
+        if fld_value is attr.NOTHING:
+            return attr.NOTHING
+        # if field is MultiOutputFile and the fld_value is a list,
+        # each element of the list should be used separately in the template
+        # and return a list with formatted values
+        if field.type is MultiOutputFile and type(fld_value) is list:
+            formatted_value = []
+            for el in fld_value:
+                formatted_value.append(
+                    _element_formatting(
+                        template,
+                        fld_name=fld_name,
+                        fld_value=el,
+                        keep_extension=keep_extension,
+                    )
                 )
-    return {k: v for k, v in dict_.items() if getattr(inputs, k) != v}
+        else:
+            formatted_value = _element_formatting(
+                template,
+                fld_name=fld_name,
+                fld_value=fld_value,
+                keep_extension=keep_extension,
+            )
+        return formatted_value
+    else:
+        raise NotImplementedError("should we allow for more args in the template?")
+
+
+def _element_formatting(template, fld_name, fld_value, keep_extension):
+    """Formatting a single template for a single element of field value (if a list).
+    Taking into account that field values and template could have file extensions
+    (assuming that if template has extension, the field value extension is removed,
+    if field has extension, and no template extension, than it is moved to the end),
+    """
+    fld_value_parent = Path(fld_value).parent
+    fld_value_name = Path(fld_value).name
+
+    name, *ext = fld_value_name.split(".", maxsplit=1)
+    filename = str(fld_value_parent / name)
+
+    # if keep_extension is False, the extensions are removed
+    if keep_extension is False:
+        ext = []
+    if template.endswith(f"{{{fld_name}}}"):
+        # if no suffix added in template, the simplest formatting should work
+        # recreating fld_value with the updated extension
+        fld_value_upd = ".".join([filename] + ext)
+        formatted_value = template.format(**{fld_name: fld_value_upd})
+    elif "." not in template:  # the template doesn't have its own extension
+        # if the fld_value has extension, it will be moved to the end
+        formatted_value = ".".join([template.format(**{fld_name: filename})] + ext)
+    else:  # template has its own extension
+        # removing fld_value extension if any
+        formatted_value = template.format(**{fld_name: filename})
+    return formatted_value
 
 
 def is_local_file(f):
-    from .specs import File
+    # breakpoint()
+    from .specs import File, Directory, MultiInputFile
 
-    return f.type is File and "container_path" not in f.metadata
+    if "container_path" not in f.metadata and (
+        f.type in [File, Directory, MultiInputFile]
+        or "pydra.engine.specs.File" in str(f.type)
+        or "pydra.engine.specs.Directory" in str(f.type)
+    ):
+        return True
+    else:
+        return False
 
 
-def is_existing_file(f):
+def is_existing_file(value):
     """ checking if an object is an existing file"""
-    if not f:
+    if isinstance(value, str) and value == "":
         return False
     try:
-        return Path(f).exists()
+        return Path(value).exists()
     except TypeError:
         return False

@@ -1,13 +1,15 @@
 """Execution workers."""
 import asyncio
-import sys
+import sys, os, json
 import re
 from tempfile import gettempdir
 from pathlib import Path
+from shutil import copyfile
 
 import concurrent.futures as cf
 
-from .helpers import create_pyscript, read_and_display_async, save
+from .core import TaskBase
+from .helpers import get_available_cpus, read_and_display_async, save, load_and_run
 
 import logging
 
@@ -65,26 +67,6 @@ class DistributedWorker(Worker):
         self.max_jobs = max_jobs
         """Maximum number of concurrently running jobs."""
         self._jobs = 0
-
-    def _prepare_runscripts(self, task, interpreter="/bin/sh", rerun=False):
-        script_dir = (
-            task.cache_dir / f"{self.__class__.__name__}_scripts" / task.checksum
-        )
-        script_dir.mkdir(parents=True, exist_ok=True)
-        if not (script_dir / "_task.pkl").exists():
-            save(script_dir, task=task)
-        pyscript = create_pyscript(script_dir, task.checksum, rerun=rerun)
-        batchscript = script_dir / f"batchscript_{task.checksum}.sh"
-        bcmd = "\n".join(
-            (
-                f"#!{interpreter}",
-                f"#SBATCH --output={str(script_dir / 'slurm-%j.out')}",
-                f"{sys.executable} {str(pyscript)}",
-            )
-        )
-        with batchscript.open("wt") as fp:
-            fp.writelines(bcmd)
-        return script_dir, pyscript, batchscript
 
     async def fetch_finished(self, futures):
         """
@@ -163,8 +145,8 @@ class ConcurrentFuturesWorker(Worker):
 
     def __init__(self, n_procs=None):
         """Initialize Worker."""
-        super(ConcurrentFuturesWorker, self).__init__()
-        self.n_procs = n_procs
+        super().__init__()
+        self.n_procs = get_available_cpus() if n_procs is None else n_procs
         # added cpu_count to verify, remove once confident and let PPE handle
         self.pool = cf.ProcessPoolExecutor(self.n_procs)
         # self.loop = asyncio.get_event_loop()
@@ -177,7 +159,13 @@ class ConcurrentFuturesWorker(Worker):
 
     async def exec_as_coro(self, runnable, rerun=False):
         """Run a task (coroutine wrapper)."""
-        res = await self.loop.run_in_executor(self.pool, runnable._run, rerun)
+        if isinstance(runnable, TaskBase):
+            res = await self.loop.run_in_executor(self.pool, runnable._run, rerun)
+        else:  # it could be tuple that includes pickle files with tasks and inputs
+            ind, task_main_pkl, task_orig = runnable
+            res = await self.loop.run_in_executor(
+                self.pool, load_and_run, task_main_pkl, ind, rerun
+            )
         return res
 
     def close(self):
@@ -193,9 +181,7 @@ class SlurmWorker(DistributedWorker):
         "(?P<jobid>\\d*) +(?P<status>\\w*)\\+? +" "(?P<exit_code>\\d+):\\d+"
     )
 
-    def __init__(
-        self, loop=None, max_jobs=None, poll_delay=1, sbatch_args=None, **kwargs
-    ):
+    def __init__(self, loop=None, max_jobs=None, poll_delay=1, sbatch_args=None):
         """
         Initialize SLURM Worker.
 
@@ -214,38 +200,92 @@ class SlurmWorker(DistributedWorker):
             poll_delay = 0
         self.poll_delay = poll_delay
         self.sbatch_args = sbatch_args or ""
+        self.error = {}
 
     def run_el(self, runnable, rerun=False):
         """Worker submission API."""
-        script_dir, _, batch_script = self._prepare_runscripts(runnable, rerun=rerun)
+        script_dir, batch_script = self._prepare_runscripts(runnable, rerun=rerun)
         if (script_dir / script_dir.parts[1]) == gettempdir():
             logger.warning("Temporary directories may not be shared across computers")
-        return self._submit_job(runnable, batch_script)
+        if isinstance(runnable, TaskBase):
+            cache_dir = runnable.cache_dir
+            name = runnable.name
+            uid = runnable.uid
+        else:  # runnable is a tuple (ind, pkl file, task)
+            cache_dir = runnable[-1].cache_dir
+            name = runnable[-1].name
+            uid = f"{runnable[-1].uid}_{runnable[0]}"
 
-    async def _submit_job(self, task, batchscript):
+        return self._submit_job(batch_script, name=name, uid=uid, cache_dir=cache_dir)
+
+    def _prepare_runscripts(self, task, interpreter="/bin/sh", rerun=False):
+        if isinstance(task, TaskBase):
+            cache_dir = task.cache_dir
+            ind = None
+            uid = task.uid
+        else:
+            ind = task[0]
+            cache_dir = task[-1].cache_dir
+            uid = f"{task[-1].uid}_{ind}"
+
+        script_dir = cache_dir / f"{self.__class__.__name__}_scripts" / uid
+        script_dir.mkdir(parents=True, exist_ok=True)
+        if ind is None:
+            if not (script_dir / "_task.pkl").exists():
+                save(script_dir, task=task)
+        else:
+            copyfile(task[1], script_dir / "_task.pklz")
+
+        task_pkl = script_dir / "_task.pklz"
+        if not task_pkl.exists() or not task_pkl.stat().st_size:
+            raise Exception("Missing or empty task!")
+
+        batchscript = script_dir / f"batchscript_{uid}.sh"
+        python_string = f"""'from pydra.engine.helpers import load_and_run; load_and_run(task_pkl="{str(task_pkl)}", ind={ind}, rerun={rerun}) '
+        """
+        bcmd = "\n".join(
+            (
+                f"#!{interpreter}",
+                f"#SBATCH --output={str(script_dir / 'slurm-%j.out')}",
+                f"{sys.executable} -c " + python_string,
+            )
+        )
+        with batchscript.open("wt") as fp:
+            fp.writelines(bcmd)
+        return script_dir, batchscript
+
+    async def _submit_job(self, batchscript, name, uid, cache_dir):
         """Coroutine that submits task runscript and polls job until completion or error."""
+        script_dir = cache_dir / f"{self.__class__.__name__}_scripts" / uid
         sargs = self.sbatch_args.split()
         jobname = re.search(r"(?<=-J )\S+|(?<=--job-name=)\S+", self.sbatch_args)
         if not jobname:
-            jobname = ".".join((task.name, task.checksum))
+            jobname = ".".join((name, uid))
             sargs.append(f"--job-name={jobname}")
         output = re.search(r"(?<=-o )\S+|(?<=--output=)\S+", self.sbatch_args)
         if not output:
-            self.output = str(batchscript.parent / "slurm-%j.out")
-            sargs.append(f"--output={self.output}")
+            output_file = str(script_dir / "slurm-%j.out")
+            sargs.append(f"--output={output_file}")
         error = re.search(r"(?<=-e )\S+|(?<=--error=)\S+", self.sbatch_args)
         if not error:
-            self.error = str(batchscript.parent / "slurm-%j.err")
-            sargs.append(f"--error={self.error}")
+            error_file = str(script_dir / "slurm-%j.err")
+            sargs.append(f"--error={error_file}")
+        else:
+            error_file = None
         sargs.append(str(batchscript))
         # TO CONSIDER: add random sleep to avoid overloading calls
-        _, stdout, _ = await read_and_display_async("sbatch", *sargs, hide_display=True)
+        rc, stdout, stderr = await read_and_display_async(
+            "sbatch", *sargs, hide_display=True
+        )
         jobid = re.search(r"\d+", stdout)
-        if not jobid:
+        if rc:
+            raise RuntimeError(f"Error returned from sbatch: {stderr}")
+        elif not jobid:
             raise RuntimeError("Could not extract job ID")
         jobid = jobid.group()
-        self.output = self.output.replace("%j", jobid)
-        self.error = self.error.replace("%j", jobid)
+        if error_file:
+            error_file = error_file.replace("%j", jobid)
+        self.error[jobid] = error_file.replace("%j", jobid)
         # intermittent polling
         while True:
             # 3 possibilities
@@ -254,7 +294,21 @@ class SlurmWorker(DistributedWorker):
             # Exception: Polling / job failure
             done = await self._poll_job(jobid)
             if done:
-                return task
+                if (
+                    done in ["CANCELLED", "TIMEOUT", "PREEMPTED"]
+                    and "--no-requeue" not in self.sbatch_args
+                ):
+                    # loading info about task with a specific uid
+                    info_file = cache_dir / f"{uid}_info.json"
+                    if info_file.exists():
+                        checksum = json.loads(info_file.read_text())["checksum"]
+                        if (cache_dir / f"{checksum}.lock").exists():
+                            # for pyt3.8 we could you missing_ok=True
+                            (cache_dir / f"{checksum}.lock").unlink()
+                    cmd_re = ("scontrol", "requeue", jobid)
+                    await read_and_display_async(*cmd_re, hide_display=True)
+                else:
+                    return True
             await asyncio.sleep(self.poll_delay)
 
     async def _poll_job(self, jobid):
@@ -273,12 +327,15 @@ class SlurmWorker(DistributedWorker):
         if not stdout:
             raise RuntimeError("Job information not found")
         m = self._sacct_re.search(stdout)
+        error_file = self.error[jobid]
         if int(m.group("exit_code")) != 0 or m.group("status") != "COMPLETED":
-            if m.group("status") in ["RUNNING", "PENDING"]:
+            if m.group("status") in ["CANCELLED", "TIMEOUT", "PREEMPTED"]:
+                return m.group("status")
+            elif m.group("status") in ["RUNNING", "PENDING"]:
                 return False
             # TODO: potential for requeuing
             # parsing the error message
-            error_line = Path(self.error).read_text().split("\n")[-2]
+            error_line = Path(error_file).read_text().split("\n")[-2]
             if "Exception" in error_line:
                 error_message = error_line.replace("Exception: ", "")
             elif "Error" in error_line:
@@ -287,3 +344,39 @@ class SlurmWorker(DistributedWorker):
                 error_message = "Job failed (unknown reason - TODO)"
             raise Exception(error_message)
         return True
+
+
+class DaskWorker(Worker):
+    """ A worker to execute in parallel using Dask.distributed.
+        This is an experimental implementation with limited testing.
+    """
+
+    def __init__(self, **kwargs):
+        """Initialize Worker."""
+        super().__init__()
+        try:
+            from dask.distributed import Client
+        except ImportError:
+            logger.critical("Please instiall Dask distributed.")
+            raise
+        self.client = None
+        self.client_args = kwargs
+        logger.debug("Initialize Dask")
+
+    def run_el(self, runnable, rerun=False, **kwargs):
+        """Run a task."""
+        return self.exec_dask(runnable, rerun=rerun)
+
+    async def exec_dask(self, runnable, rerun=False):
+        """Run a task (coroutine wrapper)."""
+        if self.client is None:
+            from dask.distributed import Client
+
+            self.client = await Client(**self.client_args, asynchronous=True)
+        future = self.client.submit(runnable._run, rerun)
+        result = await future
+        return result
+
+    def close(self):
+        """Finalize the internal pool of tasks."""
+        pass

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import typing as ty
 from copy import deepcopy
+from uuid import uuid4
 
 import cloudpickle as cp
 from filelock import SoftFileLock
@@ -34,8 +35,6 @@ from .helpers import (
     ensure_list,
     record_error,
     hash_function,
-    output_from_inputfields,
-    output_names_from_inputfields,
 )
 from .helpers_file import copyfile_input, template_update
 from .graph import DiGraph
@@ -81,9 +80,10 @@ class TaskBase:
         audit_flags: AuditFlag = AuditFlag.NONE,
         cache_dir=None,
         cache_locations=None,
-        inputs: ty.Union[ty.Text, File, ty.Dict, None] = None,
+        inputs: ty.Optional[ty.Union[ty.Text, File, ty.Dict]] = None,
         messenger_args=None,
         messengers=None,
+        rerun=False,
     ):
         """
         Initialize a task.
@@ -125,22 +125,45 @@ class TaskBase:
         if TaskBase._etelemetry_version_data is None:
             TaskBase._etelemetry_version_data = check_latest_version()
 
+        # raise error if name is same as of attributes
+        if name in dir(self):
+            raise ValueError("Cannot use names of attributes or methods as task name")
         self.name = name
         if not self.input_spec:
             raise Exception("No input_spec in class: %s" % self.__class__.__name__)
         klass = make_klass(self.input_spec)
-        # todo should be used to input_check in spec??
+
         self.inputs = klass(
             **{
+                # in attrs names that starts with "_" could be set when name provided w/o "_"
                 (f.name[1:] if f.name.startswith("_") else f.name): f.default
                 for f in attr.fields(klass)
             }
         )
+
         self.input_names = [
             field.name
             for field in attr.fields(klass)
             if field.name not in ["_func", "_graph_checksums"]
         ]
+
+        if inputs:
+            if isinstance(inputs, dict):
+                # selecting items that are in input_names (ignoring fields that are not in input_spec)
+                inputs = {k: v for k, v in inputs.items() if k in self.input_names}
+            # TODO: this needs to finished and tested after #305
+            elif Path(inputs).is_file():
+                inputs = json.loads(Path(inputs).read_text())
+            # TODO: this needs to finished and tested after #305
+            elif isinstance(inputs, str):
+                if self._input_sets is None or inputs not in self._input_sets:
+                    raise ValueError(f"Unknown input set {inputs!r}")
+                inputs = self._input_sets[inputs]
+
+        self.inputs = attr.evolve(self.inputs, **inputs)
+
+        # checking if metadata is set properly
+        self.inputs.check_metadata()
         # dictionary to save the connections with lazy fields
         self.inp_lf = {}
         self.state = None
@@ -150,18 +173,6 @@ class TaskBase:
         self._done = False
         if self._input_sets is None:
             self._input_sets = {}
-        if inputs:
-            if isinstance(inputs, dict):
-                inputs = {k: v for k, v in inputs.items() if k in self.input_names}
-            elif Path(inputs).is_file():
-                inputs = json.loads(Path(inputs).read_text())
-            elif isinstance(inputs, str):
-                if self._input_sets is None or inputs not in self._input_sets:
-                    raise ValueError("Unknown input set {!r}".format(inputs))
-                inputs = self._input_sets[inputs]
-            self.inputs = attr.evolve(self.inputs, **inputs)
-            self.inputs.check_metadata()
-            self.state_inputs = inputs
 
         self.audit = Audit(
             audit_flags=audit_flags,
@@ -173,9 +184,13 @@ class TaskBase:
         self.cache_locations = cache_locations
         self.allow_cache_override = True
         self._checksum = None
+        self._uid = uuid4().hex
+        # if True the results are not checked (does not propagate to nodes)
+        self.task_rerun = rerun
 
         self.plugin = None
         self.hooks = TaskHook()
+        self._errored = False
 
     def __str__(self):
         return self.name
@@ -215,17 +230,21 @@ class TaskBase:
         return self._version
 
     @property
-    def checksum(self):
-        """Calculate a unique checksum of this task."""
-        # if checksum is called before run the _graph_checksums is not ready
-        if is_workflow(self) and self.inputs._graph_checksums is attr.NOTHING:
-            self.inputs._graph_checksums = [nd.checksum for nd in self.graph_sorted]
+    def errored(self):
+        """Check if the task has raised an error"""
+        return self._errored
 
+    @property
+    def checksum(self):
+        """ Calculates the unique checksum of the task.
+            Used to create specific directory name for task that are run;
+            and to create nodes checksums needed for graph checkums
+            (before the tasks have inputs etc.)
+        """
         input_hash = self.inputs.hash
         if self.state is None:
             self._checksum = create_checksum(self.__class__.__name__, input_hash)
         else:
-            # including splitter in the hash
             splitter_hash = hash_function(self.state.splitter)
             self._checksum = create_checksum(
                 self.__class__.__name__, hash_function([input_hash, splitter_hash])
@@ -234,10 +253,9 @@ class TaskBase:
 
     def checksum_states(self, state_index=None):
         """
-        Calculate a checksum for the specific state or all of the states.
-
+        Calculate a checksum for the specific state or all of the states of the task.
         Replaces lists in the inputs fields with a specific values for states.
-        Can be used only for tasks with a state.
+        Used to recreate names of the task directories,
 
         Parameters
         ----------
@@ -245,8 +263,9 @@ class TaskBase:
             TODO
 
         """
-        self.state.prepare_states(self.inputs)
-        self.state.prepare_inputs()
+        if is_workflow(self) and self.inputs._graph_checksums is attr.NOTHING:
+            self.inputs._graph_checksums = [nd.checksum for nd in self.graph_sorted]
+
         if state_index is not None:
             inputs_copy = deepcopy(self.inputs)
             for key, ind in self.state.inputs_ind[state_index].items():
@@ -255,14 +274,41 @@ class TaskBase:
                     key.split(".")[1],
                     getattr(inputs_copy, key.split(".")[1])[ind],
                 )
+            # setting files_hash again in case it was cleaned by setting specific element
+            # that might be important for outer splitter of input variable with big files
+            # the file can be changed with every single index even if there are only two files
+            inputs_copy.files_hash = self.inputs.files_hash
             input_hash = inputs_copy.hash
-            checksum_ind = create_checksum(self.__class__.__name__, input_hash)
+            # updating self.inputs.files_hash, so big files hashes
+            # doesn't have to be recompute for the next element
+            for key, val in inputs_copy.files_hash.items():
+                if val:
+                    self.inputs.files_hash[key].update(val)
+            if is_workflow(self):
+                con_hash = hash_function(self._connections)
+                hash_list = [input_hash, con_hash]
+                checksum_ind = create_checksum(
+                    self.__class__.__name__, self._checksum_wf(input_hash)
+                )
+            else:
+                checksum_ind = create_checksum(self.__class__.__name__, input_hash)
             return checksum_ind
         else:
             checksum_list = []
+            if not hasattr(self.state, "inputs_ind"):
+                self.state.prepare_states(self.inputs)
+                self.state.prepare_inputs()
             for ind in range(len(self.state.inputs_ind)):
                 checksum_list.append(self.checksum_states(state_index=ind))
             return checksum_list
+
+    @property
+    def uid(self):
+        """ the unique id number for the task
+            It will be used to create unique names for slurm scripts etc.
+            without a need to run checksum
+        """
+        return self._uid
 
     def set_state(self, splitter, combiner=None):
         """
@@ -286,10 +332,32 @@ class TaskBase:
 
     @property
     def output_names(self):
-        """Get the names of the parameters generated by the task."""
-        output_spec_names = [f.name for f in attr.fields(make_klass(self.output_spec))]
-        from_input_spec_names = output_names_from_inputfields(self.inputs)
-        return output_spec_names + from_input_spec_names
+        """Get the names of the outputs from the task's output_spec
+            (not everything has to be generated, see generated_output_names).
+        """
+        return [f.name for f in attr.fields(make_klass(self.output_spec))]
+
+    @property
+    def generated_output_names(self):
+        """ Get the names of the outputs generated by the task.
+            If the spec doesn't have generated_output_names method,
+            it uses output_names.
+            The results depends on the input provided to the task
+        """
+        output_klass = make_klass(self.output_spec)
+        if hasattr(output_klass, "generated_output_names"):
+            output = output_klass(**{f.name: None for f in attr.fields(output_klass)})
+            # using updated input (after filing the templates)
+            _inputs = deepcopy(self.inputs)
+            modified_inputs = template_update(_inputs, self.output_dir)
+            if modified_inputs:
+                _inputs = attr.evolve(_inputs, **modified_inputs)
+
+            return output.generated_output_names(
+                inputs=_inputs, output_dir=self.output_dir
+            )
+        else:
+            return self.output_names
 
     @property
     def can_resume(self):
@@ -333,26 +401,28 @@ class TaskBase:
             return [self._cache_dir / checksum for checksum in self.checksum_states()]
         return self._cache_dir / self.checksum
 
-    def __call__(self, submitter=None, plugin=None, rerun=False, **kwargs):
+    def __call__(
+        self, submitter=None, plugin=None, plugin_kwargs=None, rerun=False, **kwargs
+    ):
         """Make tasks callable themselves."""
         from .submitter import Submitter
 
         if submitter and plugin:
             raise Exception("Specify submitter OR plugin, not both")
-        plugin = plugin or self.plugin
-        if plugin:
-            submitter = Submitter(plugin=plugin)
-        elif self.state:
-            submitter = Submitter()
+        elif submitter:
+            pass
+        # if there is plugin provided or the task is a Workflow or has a state,
+        # the submitter will be created using provided plugin, self.plugin or "cf"
+        elif plugin or self.state or is_workflow(self):
+            plugin = plugin or self.plugin or "cf"
+            if plugin_kwargs is None:
+                plugin_kwargs = {}
+            submitter = Submitter(plugin=plugin, **plugin_kwargs)
 
         if submitter:
             with submitter as sub:
                 res = sub(self)
-        else:
-            if is_workflow(self):
-                raise NotImplementedError(
-                    "TODO: linear workflow execution - assign submitter or plugin for now"
-                )
+        else:  # tasks without state could be run without a submitter
             res = self._run(rerun=rerun, **kwargs)
         return res
 
@@ -363,12 +433,15 @@ class TaskBase:
         lockfile = self.cache_dir / (checksum + ".lock")
         # Eagerly retrieve cached - see scenarios in __init__()
         self.hooks.pre_run(self)
-        # TODO add signal handler for processes killed after lock acquisition
         with SoftFileLock(lockfile):
-            if not rerun:
+            if not (rerun or self.task_rerun):
                 result = self.result()
                 if result is not None:
                     return result
+            # adding info file with the checksum in case the task was cancelled
+            # and the lockfile has to be removed
+            with open(self.cache_dir / f"{self.uid}_info.json", "w") as jsonfile:
+                json.dump({"checksum": self.checksum}, jsonfile)
             # Let only one equivalent process run
             odir = self.output_dir
             if not self.can_resume and odir.exists():
@@ -377,8 +450,10 @@ class TaskBase:
             odir.mkdir(parents=False, exist_ok=True if self.can_resume else False)
             orig_inputs = attr.asdict(self.inputs)
             map_copyfiles = copyfile_input(self.inputs, self.output_dir)
-            modified_inputs = template_update(self.inputs, map_copyfiles)
-            if modified_inputs is not None:
+            modified_inputs = template_update(
+                self.inputs, self.output_dir, map_copyfiles=map_copyfiles
+            )
+            if modified_inputs:
                 self.inputs = attr.evolve(self.inputs, **modified_inputs)
             self.audit.start_audit(odir)
             result = Result(output=None, runtime=None, errored=False)
@@ -386,7 +461,7 @@ class TaskBase:
             try:
                 self.audit.monitor()
                 self._run_task()
-                result.output = self._collect_outputs()
+                result.output = self._collect_outputs(output_dir=odir)
             except Exception as e:
                 record_error(self.output_dir, e)
                 result.errored = True
@@ -395,19 +470,24 @@ class TaskBase:
                 self.hooks.post_run_task(self, result)
                 self.audit.finalize_audit(result)
                 save(odir, result=result, task=self)
-                for k, v in orig_inputs.items():
-                    setattr(self.inputs, k, v)
+                self.output_ = None
+                # removing the additional file with the chcksum
+                (self.cache_dir / f"{self.uid}_info.json").unlink()
+                # # function etc. shouldn't change anyway, so removing
+                orig_inputs = dict(
+                    (k, v) for (k, v) in orig_inputs.items() if not k.startswith("_")
+                )
+                self.inputs = attr.evolve(self.inputs, **orig_inputs)
                 os.chdir(cwd)
         self.hooks.post_run(self, result)
         return result
 
-    def _collect_outputs(self):
+    def _collect_outputs(self, output_dir):
         run_output = self.output_
-        self.output_spec = output_from_inputfields(self.output_spec, self.inputs)
         output_klass = make_klass(self.output_spec)
         output = output_klass(**{f.name: None for f in attr.fields(output_klass)})
         other_output = output.collect_additional_outputs(
-            self.input_spec, self.inputs, self.output_dir
+            self.inputs, output_dir, run_output
         )
         return attr.evolve(output, **run_output, **other_output)
 
@@ -432,7 +512,6 @@ class TaskBase:
             )
         if kwargs:
             self.inputs = attr.evolve(self.inputs, **kwargs)
-            self.state_inputs = kwargs
         if not self.state or splitter != self.state.splitter:
             self.set_state(splitter)
         return self
@@ -495,16 +574,13 @@ class TaskBase:
             inputs_dict = {inp: getattr(self.inputs, inp) for inp in self.input_names}
             return None, inputs_dict
 
-    def to_job(self, ind):
-        """Run interface one element generated from node_state."""
-        # logger.debug("Run interface el, name={}, ind={}".format(self.name, ind))
-        el = deepcopy(self)
-        el.state = None
-        # dj might be needed
-        # el._checksum = None
-        _, inputs_dict = self.get_input_el(ind)
-        el.inputs = attr.evolve(el.inputs, **inputs_dict)
-        return el
+    def pickle_task(self):
+        """ Pickling the tasks with full inputs"""
+        pkl_files = self.cache_dir / "pkl_files"
+        pkl_files.mkdir(exist_ok=True, parents=True)
+        task_main_path = pkl_files / f"{self.name}_{self.uid}_task.pklz"
+        save(task_path=pkl_files, task=self, name_prefix=f"{self.name}_{self.uid}")
+        return task_main_path
 
     @property
     def done(self):
@@ -512,42 +588,67 @@ class TaskBase:
         # if any of the field is lazy, there is no need to check results
         if is_lazy(self.inputs):
             return False
+        _result = self.result()
         if self.state:
             # TODO: only check for needed state result
-            if self.result() and all(self.result()):
-                return True
+            if _result and all(_result):
+                if self.state.combiner and isinstance(_result[0], list):
+                    for res_l in _result:
+                        if any([res.errored for res in res_l]):
+                            raise ValueError(f"Task {self.name} raised an error")
+                    return True
+                else:
+                    if any([res.errored for res in _result]):
+                        raise ValueError(f"Task {self.name} raised an error")
+                    return True
             # checking if self.result() is not an empty list only because
             # the states_ind is an empty list (input field might be an empty list)
             elif (
-                self.result() == []
+                _result == []
                 and hasattr(self.state, "states_ind")
                 and self.state.states_ind == []
             ):
                 return True
         else:
-            if self.result():
-                return True
+            if _result:
+                if _result.errored:
+                    self._errored = True
+                    raise ValueError(f"Task {self.name} raised an error")
+                else:
+                    return True
         return False
 
-    def _combined_output(self):
+    def _combined_output(self, return_inputs=False):
         combined_results = []
         for (gr, ind_l) in self.state.final_combined_ind_mapping.items():
-            combined_results.append([])
+            combined_results_gr = []
             for ind in ind_l:
                 result = load_result(self.checksum_states(ind), self.cache_locations)
                 if result is None:
                     return None
-                combined_results[gr].append(result)
-        return combined_results
+                if return_inputs is True or return_inputs == "val":
+                    result = (self.state.states_val[ind], result)
+                elif return_inputs == "ind":
+                    result = (self.state.states_ind[ind], result)
+                combined_results_gr.append(result)
+            combined_results.append(combined_results_gr)
+        if len(combined_results) == 1 and self.state.splitter_rpn_final == []:
+            # in case it's full combiner, removing the nested structure
+            return combined_results[0]
+        else:
+            return combined_results
 
-    def result(self, state_index=None):
+    def result(self, state_index=None, return_inputs=False):
         """
         Retrieve the outcomes of this particular task.
 
         Parameters
         ----------
-        state_index :
-            TODO
+        state_index : :obj: `int`
+            index of the element for task with splitter and multiple states
+        return_inputs : :obj: `bool`, :obj:`str`
+            if True or "val" result is returned together with values of the input fields,
+            if "ind" result is returned together with indices of the input fields
 
         Returns
         -------
@@ -556,32 +657,59 @@ class TaskBase:
         """
         # TODO: check if result is available in load_result and
         # return a future if not
+        if self.errored:
+            return Result(output=None, runtime=None, errored=True)
         if self.state:
             if state_index is None:
                 # if state_index=None, collecting all results
                 if self.state.combiner:
-                    return self._combined_output()
+                    return self._combined_output(return_inputs=return_inputs)
                 else:
                     results = []
-                    for checksum in self.checksum_states():
+                    for ind in range(len(self.state.inputs_ind)):
+                        checksum = self.checksum_states(state_index=ind)
                         result = load_result(checksum, self.cache_locations)
                         if result is None:
                             return None
                         results.append(result)
-                    return results
+                    if return_inputs is True or return_inputs == "val":
+                        return list(zip(self.state.states_val, results))
+                    elif return_inputs == "ind":
+                        return list(zip(self.state.states_ind, results))
+                    else:
+                        return results
             else:  # state_index is not None
                 if self.state.combiner:
-                    return self._combined_output()[state_index]
+                    return self._combined_output(return_inputs=return_inputs)[
+                        state_index
+                    ]
                 result = load_result(
                     self.checksum_states(state_index), self.cache_locations
                 )
-                return result
+                if return_inputs is True or return_inputs == "val":
+                    return (self.state.states_val[state_index], result)
+                elif return_inputs == "ind":
+                    return (self.state.states_ind[state_index], result)
+                else:
+                    return result
         else:
             if state_index is not None:
                 raise ValueError("Task does not have a state")
             checksum = self.checksum
             result = load_result(checksum, self.cache_locations)
-            return result
+            if result and result.errored:
+                self._errored = True
+            if return_inputs is True or return_inputs == "val":
+                inputs_val = {
+                    f"{self.name}.{inp}": getattr(self.inputs, inp)
+                    for inp in self.input_names
+                }
+                return (inputs_val, result)
+            elif return_inputs == "ind":
+                inputs_ind = {f"{self.name}.{inp}": None for inp in self.input_names}
+                return (inputs_ind, result)
+            else:
+                return result
 
     def _reset(self):
         """Reset the connections between inputs and LazyFields."""
@@ -602,10 +730,12 @@ class Workflow(TaskBase):
         audit_flags: AuditFlag = AuditFlag.NONE,
         cache_dir=None,
         cache_locations=None,
-        input_spec: ty.Union[ty.List[ty.Text], BaseSpec, None] = None,
+        input_spec: ty.Optional[ty.Union[ty.List[ty.Text], SpecInfo, BaseSpec]] = None,
         messenger_args=None,
         messengers=None,
-        output_spec: ty.Optional[BaseSpec] = None,
+        output_spec: ty.Optional[ty.Union[SpecInfo, BaseSpec]] = None,
+        rerun=False,
+        propagate_rerun=True,
         **kwargs,
     ):
         """
@@ -653,13 +783,15 @@ class Workflow(TaskBase):
                     ],
                     bases=(BaseSpec,),
                 )
-        if output_spec is None:
-            output_spec = SpecInfo(
-                name="Output", fields=[("out", ty.Any)], bases=(BaseSpec,)
-            )
         self.output_spec = output_spec
 
-        super(Workflow, self).__init__(
+        if name in dir(self):
+            raise ValueError(
+                "Cannot use names of attributes or methods as workflow name"
+            )
+        self.name = name
+
+        super().__init__(
             name=name,
             inputs=kwargs,
             cache_dir=cache_dir,
@@ -667,13 +799,16 @@ class Workflow(TaskBase):
             audit_flags=audit_flags,
             messengers=messengers,
             messenger_args=messenger_args,
+            rerun=rerun,
         )
 
-        self.graph = DiGraph()
+        self.graph = DiGraph(name=name)
         self.name2obj = {}
 
         # store output connections
         self._connections = None
+        # propagating rerun if task_rerun=True
+        self.propagate_rerun = propagate_rerun
 
     def __getattr__(self, name):
         if name == "lzin":
@@ -685,23 +820,6 @@ class Workflow(TaskBase):
         return self.__getattribute__(name)
 
     @property
-    def done_all_tasks(self):
-        """
-        Check if all tasks from the graph are done.
-
-        .. important ::
-            The fact that all tasks are reported as done
-            doesn't mean that results of the workflow
-            are available.
-            That can be checked with :py:meth:`~Workflow.done`.
-
-        """
-        for task in self.graph.nodes:
-            if not task.done:
-                return False
-        return True
-
-    @property
     def nodes(self):
         """Get the list of node names."""
         return self.name2obj.values()
@@ -710,6 +828,41 @@ class Workflow(TaskBase):
     def graph_sorted(self):
         """Get a sorted graph representation of the workflow."""
         return self.graph.sorted_nodes
+
+    @property
+    def checksum(self):
+        """ Calculates the unique checksum of the task.
+            Used to create specific directory name for task that are run;
+            and to create nodes checksums needed for graph checkums
+            (before the tasks have inputs etc.)
+        """
+        # if checksum is called before run the _graph_checksums is not ready
+        if is_workflow(self) and self.inputs._graph_checksums is attr.NOTHING:
+            self.inputs._graph_checksums = [nd.checksum for nd in self.graph_sorted]
+
+        input_hash = self.inputs.hash
+        if not self.state:
+            self._checksum = create_checksum(
+                self.__class__.__name__, self._checksum_wf(input_hash)
+            )
+        else:
+            self._checksum = create_checksum(
+                self.__class__.__name__,
+                self._checksum_wf(input_hash, with_splitter=True),
+            )
+        return self._checksum
+
+    def _checksum_wf(self, input_hash, with_splitter=False):
+        """ creating hash value for workflows
+            includes connections and splitter if with_splitter is True
+        """
+        connection_hash = hash_function(self._connections)
+        hash_list = [input_hash, connection_hash]
+        if with_splitter and self.state:
+            # including splitter in the hash
+            splitter_hash = hash_function(self.state.splitter)
+            hash_list.append(splitter_hash)
+        return hash_function(hash_list)
 
     def add(self, task):
         """
@@ -721,15 +874,26 @@ class Workflow(TaskBase):
             The task to be added.
 
         """
-        if not is_task(task):
-            raise ValueError("Unknown workflow element: {!r}".format(task))
-        self.graph.add_nodes(task)
+        if task.name in dir(self):
+            raise ValueError(
+                "Cannot use names of workflow attributes or methods as task name"
+            )
+        if task.name in self.name2obj:
+            raise ValueError(
+                "Another task named {} is already added to the workflow".format(
+                    task.name
+                )
+            )
         self.name2obj[task.name] = task
+
+        if not is_task(task):
+            raise ValueError(f"Unknown workflow element: {task!r}")
+        self.graph.add_nodes(task)
         self._last_added = task
         logger.debug(f"Added {task}")
         return self
 
-    def create_connections(self, task):
+    def create_connections(self, task, detailed=False):
         """
         Add and connect a particular task to existing nodes in the workflow.
 
@@ -737,7 +901,9 @@ class Workflow(TaskBase):
         ----------
         task : :class:`TaskBase`
             The task to be added.
-
+        detailed : :obj:`bool`
+            If True, `add_edges_description` is run for self.graph to add
+            a detailed descriptions of the connections (input/output fields names)
         """
         other_states = {}
         for field in attr_fields(task.inputs):
@@ -748,51 +914,80 @@ class Workflow(TaskBase):
                 # adding an edge to the graph if task id expecting output from a different task
                 if val.name != self.name:
                     # checking if the connection is already in the graph
-                    if (getattr(self, val.name), task) in self.graph.edges:
-                        continue
-                    self.graph.add_edges((getattr(self, val.name), task))
+                    if (getattr(self, val.name), task) not in self.graph.edges:
+                        self.graph.add_edges((getattr(self, val.name), task))
+                    if detailed:
+                        self.graph.add_edges_description(
+                            (task.name, field.name, val.name, val.field)
+                        )
                     logger.debug("Connecting %s to %s", val.name, task.name)
 
-                    if getattr(self, val.name).state:
+                    if (
+                        getattr(self, val.name).state
+                        and getattr(self, val.name).state.splitter_rpn_final
+                    ):
                         # adding a state from the previous task to other_states
                         other_states[val.name] = (
                             getattr(self, val.name).state,
                             field.name,
                         )
+                else:  # LazyField with the wf input
+                    # connections with wf input should be added to the detailed graph description
+                    if detailed:
+                        self.graph.add_edges_description(
+                            (task.name, field.name, val.name, val.field)
+                        )
+
         # if task has connections state has to be recalculated
         if other_states:
-            if task.state:
-                old_splitter = task.state.splitter
-            else:
-                old_splitter = None
             if hasattr(task, "fut_combiner"):
-                task.state = state.State(
-                    task.name,
-                    splitter=old_splitter,
-                    other_states=other_states,
-                    combiner=task.fut_combiner,
+                combiner = task.fut_combiner
+            else:
+                combiner = None
+
+            if task.state:
+                task.state.update_connections(
+                    new_other_states=other_states, new_combiner=combiner
                 )
             else:
                 task.state = state.State(
-                    task.name, splitter=old_splitter, other_states=other_states
+                    task.name,
+                    splitter=None,
+                    other_states=other_states,
+                    combiner=combiner,
                 )
 
     async def _run(self, submitter=None, rerun=False, **kwargs):
         # self.inputs = dc.replace(self.inputs, **kwargs) don't need it?
+        # output_spec needs to be set using set_output or at workflow initialization
+        if self.output_spec is None:
+            raise ValueError(
+                "Workflow output cannot be None, use set_output to define output(s)"
+            )
         checksum = self.checksum
-        lockfile = self.cache_dir / (checksum + ".lock")
-        # Eagerly retrieve cached
-        if not rerun:
-            result = self.result()
-            if result is not None:
-                return result
         # creating connections that were defined after adding tasks to the wf
         for task in self.graph.nodes:
+            # if workflow has task_rerun=True and propagate_rerun=True,
+            # it should be passed to the tasks
+            if self.task_rerun and self.propagate_rerun:
+                task.task_rerun = self.task_rerun
+                # if the task is a wf, than the propagate_rerun should be also set
+                if is_workflow(task):
+                    task.propagate_rerun = self.propagate_rerun
+            task.cache_locations = task._cache_locations + self.cache_locations
             self.create_connections(task)
-        # TODO add signal handler for processes killed after lock acquisition
+        lockfile = self.cache_dir / (checksum + ".lock")
         self.hooks.pre_run(self)
         with SoftFileLock(lockfile):
-            # # Let only one equivalent process run
+            # retrieve cached results
+            if not (rerun or self.task_rerun):
+                result = self.result()
+                if result is not None:
+                    return result
+            # adding info file with the checksum in case the task was cancelled
+            # and the lockfile has to be removed
+            with open(self.cache_dir / f"{self.uid}_info.json", "w") as jsonfile:
+                json.dump({"checksum": checksum}, jsonfile)
             odir = self.output_dir
             if not self.can_resume and odir.exists():
                 shutil.rmtree(odir)
@@ -803,25 +998,30 @@ class Workflow(TaskBase):
             self.hooks.pre_run_task(self)
             try:
                 self.audit.monitor()
-                await self._run_task(submitter)
+                await self._run_task(submitter, rerun=rerun)
                 result.output = self._collect_outputs()
             except Exception as e:
                 record_error(self.output_dir, e)
                 result.errored = True
+                self._errored = True
                 raise
             finally:
                 self.hooks.post_run_task(self, result)
                 self.audit.finalize_audit(result=result)
                 save(odir, result=result, task=self)
+                # removing the additional file with the chcksum
+                (self.cache_dir / f"{self.uid}_info.json").unlink()
                 os.chdir(cwd)
         self.hooks.post_run(self, result)
+        if result is None:
+            raise Exception("This should never happen, please open new issue")
         return result
 
-    async def _run_task(self, submitter):
+    async def _run_task(self, submitter, rerun=False):
         if not submitter:
             raise Exception("Submitter should already be set.")
         # at this point Workflow is stateless so this should be fine
-        await submitter._run_workflow(self)
+        await submitter._run_workflow(self, rerun=rerun)
 
     def set_output(self, connections):
         """
@@ -833,23 +1033,50 @@ class Workflow(TaskBase):
             TODO
 
         """
+        if self._connections is None:
+            self._connections = []
         if isinstance(connections, tuple) and len(connections) == 2:
-            self._connections = [connections]
+            new_connections = [connections]
         elif isinstance(connections, list) and all(
             [len(el) == 2 for el in connections]
         ):
-            self._connections = connections
+            new_connections = connections
         elif isinstance(connections, dict):
-            self._connections = list(connections.items())
+            new_connections = list(connections.items())
         else:
             raise Exception(
                 "Connections can be a 2-elements tuple, a list of these tuples, or dictionary"
             )
-        fields = [(name, ty.Any) for name, _ in self._connections]
+        # checking if a new output name is already in the connections
+        connection_names = [name for name, _ in self._connections]
+        new_names = [name for name, _ in new_connections]
+        if set(connection_names).intersection(new_names):
+            raise Exception(
+                f"output name {set(connection_names).intersection(new_names)} is already set"
+            )
+
+        self._connections += new_connections
+        fields = []
+        for con in self._connections:
+            wf_out_nm, lf = con
+            task_nm, task_out_nm = lf.name, lf.field
+            if task_out_nm == "all_":
+                help_string = f"all outputs from {task_nm}"
+                fields.append((wf_out_nm, dict, {"help_string": help_string}))
+            else:
+                # getting information about the output field from the task output_spec
+                # providing proper type and some help string
+                task_output_spec = getattr(self, task_nm).output_spec
+                out_fld = attr.fields_dict(make_klass(task_output_spec))[task_out_nm]
+                help_string = (
+                    f"{out_fld.metadata.get('help_string', '')} (from {task_nm})"
+                )
+                fields.append((wf_out_nm, out_fld.type, {"help_string": help_string}))
         self.output_spec = SpecInfo(name="Output", fields=fields, bases=(BaseSpec,))
         logger.info("Added %s to %s", self.output_spec, self)
 
     def _collect_outputs(self):
+        error = False
         output_klass = make_klass(self.output_spec)
         output = output_klass(**{f.name: None for f in attr.fields(output_klass)})
         # collecting outputs from tasks
@@ -857,8 +1084,62 @@ class Workflow(TaskBase):
         for name, val in self._connections:
             if not isinstance(val, LazyField):
                 raise ValueError("all connections must be lazy")
-            output_wf[name] = val.get_value(self)
+            try:
+                val_out = val.get_value(self)
+                output_wf[name] = val_out
+            except ValueError:
+                output_wf[name] = None
+                # checking if the tasks has predecessors that raises error
+                if isinstance(getattr(self, val.name)._errored, list):
+                    raise ValueError(
+                        f"Tasks {getattr(self, val.name)._errored} raised an error"
+                    )
+                else:
+                    raise ValueError(f"Task {val.name} raised an error")
         return attr.evolve(output, **output_wf)
+
+    def create_dotfile(self, type="simple", export=None, name=None):
+        """creating a graph - dotfile and optionally exporting to other formats"""
+        if not name:
+            name = f"graph_{self.name}"
+        if type == "simple":
+            for task in self.graph.nodes:
+                self.create_connections(task)
+            dotfile = self.graph.create_dotfile_simple(
+                outdir=self.output_dir, name=name
+            )
+        elif type == "nested":
+            for task in self.graph.nodes:
+                self.create_connections(task)
+            dotfile = self.graph.create_dotfile_nested(
+                outdir=self.output_dir, name=name
+            )
+        elif type == "detailed":
+            # create connections with detailed=True
+            for task in self.graph.nodes:
+                self.create_connections(task, detailed=True)
+            # adding wf outputs
+            for (wf_out, lf) in self._connections:
+                self.graph.add_edges_description((self.name, wf_out, lf.name, lf.field))
+            dotfile = self.graph.create_dotfile_detailed(
+                outdir=self.output_dir, name=name
+            )
+        else:
+            raise Exception(
+                f"type of the graph can be simple, detailed or nested, "
+                f"but {type} provided"
+            )
+        if not export:
+            return dotfile
+        else:
+            if export is True:
+                export = ["png"]
+            elif isinstance(export, str):
+                export = [export]
+            formatted_dot = []
+            for ext in export:
+                formatted_dot.append(self.graph.export_graph(dotfile=dotfile, ext=ext))
+            return dotfile, formatted_dot
 
 
 def is_task(obj):

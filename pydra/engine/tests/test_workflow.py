@@ -1,40 +1,72 @@
 import pytest
-import shutil, os
+import shutil, os, sys
 import time
 import attr
+from pathlib import Path
 
 from .utils import (
     add2,
     add2_wait,
     multiply,
     power,
+    ten,
     identity,
     list_output,
+    fun_addsubvar,
     fun_addvar3,
+    fun_addvar,
+    fun_addtwo,
     add2_sub2_res,
     fun_addvar_none,
     fun_addvar_default,
     fun_write_file,
     fun_write_file_list,
     fun_write_file_list2dict,
+    list_sum,
+    DOT_FLAG,
 )
 from ..submitter import Submitter
 from ..core import Workflow
 
-if bool(shutil.which("sbatch")):
-    Plugins = ["cf", "slurm"]
-else:
-    Plugins = ["cf"]
+
+def test_wf_name_conflict1():
+    """ raise error when workflow name conflicts with a class attribute or method"""
+    with pytest.raises(ValueError) as excinfo1:
+        wf = Workflow(name="result", input_spec=["x"])
+    assert "Cannot use names of attributes or methods" in str(excinfo1.value)
+    with pytest.raises(ValueError) as excinfo2:
+        wf = Workflow(name="done", input_spec=["x"])
+    assert "Cannot use names of attributes or methods" in str(excinfo2.value)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_1(plugin):
+def test_wf_name_conflict2():
+    """ raise error when a task with the same name is already added to workflow """
+    wf = Workflow(name="wf_1", input_spec=["x"])
+    wf.add(add2(name="task_name", x=wf.lzin.x))
+    with pytest.raises(ValueError) as excinfo:
+        wf.add(identity(name="task_name", x=3))
+    assert "Another task named task_name is already added" in str(excinfo.value)
+
+
+def test_wf_no_output(plugin, tmpdir):
+    """ Raise error when output isn't set with set_output"""
+    wf = Workflow(name="wf_1", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(add2(name="add2", x=wf.lzin.x))
+    wf.inputs.x = 2
+
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "Workflow output cannot be None" in str(excinfo.value)
+
+
+def test_wf_1(plugin, tmpdir):
     """ workflow with one task and no splitter"""
     wf = Workflow(name="wf_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -46,8 +78,7 @@ def test_wf_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_1a_outpastuple(plugin):
+def test_wf_1a_outpastuple(plugin, tmpdir):
     """ workflow with one task and no splitter
         set_output takes a tuple
     """
@@ -56,6 +87,7 @@ def test_wf_1a_outpastuple(plugin):
     wf.set_output(("out", wf.add2.lzout.out))
     wf.inputs.x = 2
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -65,14 +97,13 @@ def test_wf_1a_outpastuple(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_1_call_subm(plugin):
+def test_wf_1_call_subm(plugin, tmpdir):
     """using wf.__call_ with submitter"""
     wf = Workflow(name="wf_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         wf(submitter=sub)
@@ -82,14 +113,14 @@ def test_wf_1_call_subm(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_1_call_plug(plugin):
+def test_wf_1_call_plug(plugin, tmpdir):
     """using wf.__call_ with plugin"""
     wf = Workflow(name="wf_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     wf(plugin=plugin)
 
@@ -98,14 +129,28 @@ def test_wf_1_call_plug(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_1_call_exception(plugin):
+def test_wf_1_call_noplug_nosubm(plugin, tmpdir):
+    """using wf.__call_ without plugin or submitter"""
+    wf = Workflow(name="wf_1", input_spec=["x"])
+    wf.add(add2(name="add2", x=wf.lzin.x))
+    wf.set_output([("out", wf.add2.lzout.out)])
+    wf.inputs.x = 2
+    wf.cache_dir = tmpdir
+
+    wf()
+    results = wf.result()
+    assert 4 == results.output.out
+    assert wf.output_dir.exists()
+
+
+def test_wf_1_call_exception(plugin, tmpdir):
     """using wf.__call_ with plugin and submitter - should raise an exception"""
     wf = Workflow(name="wf_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         with pytest.raises(Exception) as e:
@@ -113,8 +158,7 @@ def test_wf_1_call_exception(plugin):
         assert "Specify submitter OR plugin" in str(e.value)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_2(plugin):
+def test_wf_2(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter"""
     wf = Workflow(name="wf_2", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
@@ -122,7 +166,7 @@ def test_wf_2(plugin):
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -132,8 +176,7 @@ def test_wf_2(plugin):
     assert 8 == results.output.out
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_2a(plugin):
+def test_wf_2a(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         creating add2_task first (before calling add method),
     """
@@ -145,7 +188,7 @@ def test_wf_2a(plugin):
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -155,8 +198,7 @@ def test_wf_2a(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_2b(plugin):
+def test_wf_2b(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         creating add2_task first (before calling add method),
         adding inputs.x after add method
@@ -169,7 +211,7 @@ def test_wf_2b(plugin):
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -180,8 +222,7 @@ def test_wf_2b(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_2c_multoutp(plugin):
+def test_wf_2c_multoutp(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         setting multiple outputs for the workflow
     """
@@ -194,7 +235,7 @@ def test_wf_2c_multoutp(plugin):
     wf.set_output([("out_add2", wf.add2.lzout.out), ("out_mult", wf.mult.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -206,8 +247,7 @@ def test_wf_2c_multoutp(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_2d_outpasdict(plugin):
+def test_wf_2d_outpasdict(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         setting multiple outputs using a dictionary
     """
@@ -220,7 +260,7 @@ def test_wf_2d_outpasdict(plugin):
     wf.set_output({"out_add2": wf.add2.lzout.out, "out_mult": wf.mult.lzout.out})
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -232,8 +272,8 @@ def test_wf_2d_outpasdict(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_3(plugin):
+@pytest.mark.flaky(reruns=3)  # when dask
+def test_wf_3(plugin_dask_opt, tmpdir):
     """ testing None value for an input"""
     wf = Workflow(name="wf_3", input_spec=["x", "y"])
     wf.add(fun_addvar_none(name="addvar", a=wf.lzin.x, b=wf.lzin.y))
@@ -241,9 +281,9 @@ def test_wf_3(plugin):
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = None
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
-    with Submitter(plugin=plugin) as sub:
+    with Submitter(plugin=plugin_dask_opt) as sub:
         sub(wf)
 
     assert wf.output_dir.exists()
@@ -252,8 +292,7 @@ def test_wf_3(plugin):
 
 
 @pytest.mark.xfail(reason="the task error doesn't propagate")
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_3a_exception(plugin):
+def test_wf_3a_exception(plugin, tmpdir):
     """ testinh wf without set input, attr.NOTHING should be set
         and the function should raise an exception
     """
@@ -264,6 +303,7 @@ def test_wf_3a_exception(plugin):
     wf.inputs.x = 2
     wf.inputs.y = attr.NOTHING
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with pytest.raises(TypeError) as excinfo:
         with Submitter(plugin=plugin) as sub:
@@ -271,15 +311,14 @@ def test_wf_3a_exception(plugin):
     assert "unsupported" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_4(plugin):
+def test_wf_4(plugin, tmpdir):
     """wf with a task that doesn't set one input and use the function default value"""
     wf = Workflow(name="wf_4", input_spec=["x", "y"])
     wf.add(fun_addvar_default(name="addvar", a=wf.lzin.x))
     wf.add(add2(name="add2", x=wf.addvar.lzout.out))
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -289,8 +328,7 @@ def test_wf_4(plugin):
     assert 5 == results.output.out
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_4a(plugin):
+def test_wf_4a(plugin, tmpdir):
     """ wf with a task that doesn't set one input,
         the unset input is send to the task input,
         so the task should use the function default value
@@ -300,7 +338,7 @@ def test_wf_4a(plugin):
     wf.add(add2(name="add2", x=wf.addvar.lzout.out))
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -310,16 +348,101 @@ def test_wf_4a(plugin):
     assert 5 == results.output.out
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_1(plugin):
+def test_wf_5(plugin, tmpdir):
+    """ wf with two outputs connected to the task outputs
+        one set_output
+    """
+    wf = Workflow(name="wf_5", input_spec=["x", "y"], x=3, y=2)
+    wf.add(fun_addsubvar(name="addsub", a=wf.lzin.x, b=wf.lzin.y))
+    wf.set_output([("out_sum", wf.addsub.lzout.sum), ("out_sub", wf.addsub.lzout.sub)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert 5 == results.output.out_sum
+    assert 1 == results.output.out_sub
+
+
+def test_wf_5a(plugin, tmpdir):
+    """ wf with two outputs connected to the task outputs,
+        set_output set twice
+    """
+    wf = Workflow(name="wf_5", input_spec=["x", "y"], x=3, y=2)
+    wf.add(fun_addsubvar(name="addsub", a=wf.lzin.x, b=wf.lzin.y))
+    wf.set_output([("out_sum", wf.addsub.lzout.sum)])
+    wf.set_output([("out_sub", wf.addsub.lzout.sub)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert 5 == results.output.out_sum
+    assert 1 == results.output.out_sub
+
+
+def test_wf_5b_exception(tmpdir):
+    """  set_output used twice with the same name - exception should be raised """
+    wf = Workflow(name="wf_5", input_spec=["x", "y"], x=3, y=2)
+    wf.add(fun_addsubvar(name="addsub", a=wf.lzin.x, b=wf.lzin.y))
+    wf.set_output([("out", wf.addsub.lzout.sum)])
+    wf.cache_dir = tmpdir
+
+    with pytest.raises(Exception) as excinfo:
+        wf.set_output([("out", wf.addsub.lzout.sub)])
+    assert "is already set" in str(excinfo.value)
+
+
+def test_wf_6(plugin, tmpdir):
+    """ wf with two tasks and two outputs connected to both tasks,
+        one set_output
+    """
+    wf = Workflow(name="wf_6", input_spec=["x", "y"], x=2, y=3)
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
+    wf.add(add2(name="add2", x=wf.mult.lzout.out))
+    wf.set_output([("out1", wf.mult.lzout.out), ("out2", wf.add2.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    assert wf.output_dir.exists()
+    results = wf.result()
+    assert 6 == results.output.out1
+    assert 8 == results.output.out2
+
+
+def test_wf_6a(plugin, tmpdir):
+    """ wf with two tasks and two outputs connected to both tasks,
+        set_output used twice
+    """
+    wf = Workflow(name="wf_6", input_spec=["x", "y"], x=2, y=3)
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
+    wf.add(add2(name="add2", x=wf.mult.lzout.out))
+    wf.set_output([("out1", wf.mult.lzout.out)])
+    wf.set_output([("out2", wf.add2.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    assert wf.output_dir.exists()
+    results = wf.result()
+    assert 6 == results.output.out1
+    assert 8 == results.output.out2
+
+
+def test_wf_st_1(plugin, tmpdir):
     """ Workflow with one task, a splitter for the workflow"""
     wf = Workflow(name="wf_spl_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
 
-    wf.split(("x"))
+    wf.split("x")
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -336,16 +459,15 @@ def test_wf_st_1(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_1_call_subm(plugin):
+def test_wf_st_1_call_subm(plugin, tmpdir):
     """ Workflow with one task, a splitter for the workflow"""
     wf = Workflow(name="wf_spl_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
 
-    wf.split(("x"))
+    wf.split("x")
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         wf(submitter=sub)
@@ -360,16 +482,17 @@ def test_wf_st_1_call_subm(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_1_call_plug(plugin):
-    """ Workflow with one task, a splitter for the workflow"""
+def test_wf_st_1_call_plug(plugin, tmpdir):
+    """ Workflow with one task, a splitter for the workflow
+        using Workflow.__call__(plugin)
+    """
     wf = Workflow(name="wf_spl_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
 
-    wf.split(("x"))
+    wf.split("x")
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     wf(plugin=plugin)
 
@@ -383,16 +506,64 @@ def test_wf_st_1_call_plug(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_noinput_1(plugin):
+def test_wf_st_1_call_selfplug(plugin, tmpdir):
+    """ Workflow with one task, a splitter for the workflow
+        using Workflow.__call__() and using self.plugin
+    """
+    wf = Workflow(name="wf_spl_1", input_spec=["x"])
+    wf.add(add2(name="add2", x=wf.lzin.x))
+
+    wf.split("x")
+    wf.inputs.x = [1, 2]
+    wf.set_output([("out", wf.add2.lzout.out)])
+    wf.plugin = plugin
+    wf.cache_dir = tmpdir
+
+    wf()
+    results = wf.result()
+    # expected: [({"test7.x": 1}, 3), ({"test7.x": 2}, 4)]
+    assert results[0].output.out == 3
+    assert results[1].output.out == 4
+    # checking all directories
+    assert wf.output_dir
+    for odir in wf.output_dir:
+        assert odir.exists()
+
+
+def test_wf_st_1_call_noplug_nosubm(plugin, tmpdir):
+    """ Workflow with one task, a splitter for the workflow
+        using Workflow.__call__()  without plugin and submitter
+        (a submitter should be created within the __call__ function)
+    """
+    wf = Workflow(name="wf_spl_1", input_spec=["x"])
+    wf.add(add2(name="add2", x=wf.lzin.x))
+
+    wf.split("x")
+    wf.inputs.x = [1, 2]
+    wf.set_output([("out", wf.add2.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    wf()
+    results = wf.result()
+    # expected: [({"test7.x": 1}, 3), ({"test7.x": 2}, 4)]
+    assert results[0].output.out == 3
+    assert results[1].output.out == 4
+    # checking all directories
+    assert wf.output_dir
+    for odir in wf.output_dir:
+        assert odir.exists()
+
+
+def test_wf_st_noinput_1(plugin, tmpdir):
     """ Workflow with one task, a splitter for the workflow"""
     wf = Workflow(name="wf_spl_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
 
-    wf.split(("x"))
+    wf.split("x")
     wf.inputs.x = []
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -405,14 +576,13 @@ def test_wf_st_noinput_1(plugin):
     assert wf.output_dir == []
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_1(plugin):
+def test_wf_ndst_1(plugin, tmpdir):
     """ workflow with one task, a splitter on the task level"""
     wf = Workflow(name="wf_spl_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x).split("x"))
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -425,8 +595,7 @@ def test_wf_ndst_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_updatespl_1(plugin):
+def test_wf_ndst_updatespl_1(plugin, tmpdir):
     """ workflow with one task,
         a splitter on the task level is added *after* calling add
     """
@@ -434,7 +603,7 @@ def test_wf_ndst_updatespl_1(plugin):
     wf.add(add2(name="add2", x=wf.lzin.x))
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
     wf.add2.split("x")
 
     with Submitter(plugin=plugin) as sub:
@@ -448,8 +617,7 @@ def test_wf_ndst_updatespl_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_updatespl_1a(plugin):
+def test_wf_ndst_updatespl_1a(plugin, tmpdir):
     """ workflow with one task (initialize before calling add),
         a splitter on the task level is added *after* calling add
     """
@@ -459,7 +627,7 @@ def test_wf_ndst_updatespl_1a(plugin):
     task_add2.split("x")
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -472,8 +640,7 @@ def test_wf_ndst_updatespl_1a(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_updateinp_1(plugin):
+def test_wf_ndst_updateinp_1(plugin, tmpdir):
     """ workflow with one task,
         a splitter on the task level,
         updating input of the task after calling add
@@ -483,9 +650,9 @@ def test_wf_ndst_updateinp_1(plugin):
     wf.inputs.x = [1, 2]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
     wf.add2.split("x")
     wf.add2.inputs.x = wf.lzin.y
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -497,14 +664,13 @@ def test_wf_ndst_updateinp_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_noinput_1(plugin):
+def test_wf_ndst_noinput_1(plugin, tmpdir):
     """ workflow with one task, a splitter on the task level"""
     wf = Workflow(name="wf_spl_1", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x).split("x"))
     wf.inputs.x = []
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -517,78 +683,97 @@ def test_wf_ndst_noinput_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_2(plugin):
+def test_wf_st_2(plugin, tmpdir):
     """ workflow with one task, splitters and combiner for workflow"""
     wf = Workflow(name="wf_st_2", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x))
 
-    wf.split(("x")).combine(combiner="x")
+    wf.split("x").combine(combiner="x")
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
     results = wf.result()
-    # expected: [[({"test7.x": 1}, 3), ({"test7.x": 2}, 4)]]
-    assert results[0][0].output.out == 3
-    assert results[0][1].output.out == 4
+    # expected: [({"test7.x": 1}, 3), ({"test7.x": 2}, 4)]
+    assert results[0].output.out == 3
+    assert results[1].output.out == 4
     # checking all directories
     assert wf.output_dir
     for odir in wf.output_dir:
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_2(plugin):
+def test_wf_ndst_2(plugin, tmpdir):
     """ workflow with one task, splitters and combiner on the task level"""
     wf = Workflow(name="wf_ndst_2", input_spec=["x"])
     wf.add(add2(name="add2", x=wf.lzin.x).split("x").combine(combiner="x"))
     wf.inputs.x = [1, 2]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
     results = wf.result()
-    # expected: [[({"test7.x": 1}, 3), ({"test7.x": 2}, 4)]]
-    assert results.output.out[0] == [3, 4]
+    # expected: [({"test7.x": 1}, 3), ({"test7.x": 2}, 4)]
+    assert results.output.out == [3, 4]
     assert wf.output_dir.exists()
 
 
 # workflows with structures A -> B
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_3(plugin):
+def test_wf_st_3(plugin, tmpdir):
     """ workflow with 2 tasks, splitter on wf level"""
-    wf = Workflow(name="wf_st_3", input_spec=["x", "y"])
+    wf = Workflow(name="wfst_3", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
     wf.add(add2(name="add2", x=wf.mult.lzout.out))
     wf.inputs.x = [1, 2]
     wf.inputs.y = [11, 12]
     wf.split(("x", "y"))
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
+    expected = [
+        ({"wfst_3.x": 1, "wfst_3.y": 11}, 13),
+        ({"wfst_3.x": 2, "wfst_3.y": 12}, 26),
+    ]
+    expected_ind = [
+        ({"wfst_3.x": 0, "wfst_3.y": 0}, 13),
+        ({"wfst_3.x": 1, "wfst_3.y": 1}, 26),
+    ]
+
     results = wf.result()
-    # expected: [({"test7.x": 1, "test7.y": 11}, 13), ({"test7.x": 2, "test.y": 12}, 26)]
-    assert results[0].output.out == 13
-    assert results[1].output.out == 26
+    for i, res in enumerate(expected):
+        assert results[i].output.out == res[1]
+
+    # checking the return_inputs option, either return_inputs is True or "val",
+    # it should give values of inputs that corresponds to the specific element
+    results_verb = wf.result(return_inputs=True)
+    results_verb_val = wf.result(return_inputs="val")
+    for i, res in enumerate(expected):
+        assert (results_verb[i][0], results_verb[i][1].output.out) == res
+        assert (results_verb_val[i][0], results_verb_val[i][1].output.out) == res
+
+    # checking the return_inputs option return_inputs="ind"
+    # it should give indices of inputs (instead of values) for each element
+    results_verb_ind = wf.result(return_inputs="ind")
+    for i, res in enumerate(expected_ind):
+        assert (results_verb_ind[i][0], results_verb_ind[i][1].output.out) == res
+
     # checking all directories
     assert wf.output_dir
     for odir in wf.output_dir:
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_3(plugin):
+def test_wf_ndst_3(plugin, tmpdir):
     """Test workflow with 2 tasks, splitter on a task level"""
     wf = Workflow(name="wf_ndst_3", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split(("x", "y")))
@@ -596,7 +781,7 @@ def test_wf_ndst_3(plugin):
     wf.inputs.x = [1, 2]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -608,8 +793,7 @@ def test_wf_ndst_3(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_4(plugin):
+def test_wf_st_4(plugin, tmpdir):
     """ workflow with two tasks, scalar splitter and combiner for the workflow"""
     wf = Workflow(name="wf_st_4", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
@@ -618,32 +802,31 @@ def test_wf_st_4(plugin):
     wf.split(("x", "y"), x=[1, 2], y=[11, 12])
     wf.combine("x")
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
     results = wf.result()
     # expected: [
-    #     [({"test7.x": 1, "test7.y": 11}, 13), ({"test7.x": 2, "test.y": 12}, 26)]
+    #     ({"test7.x": 1, "test7.y": 11}, 13), ({"test7.x": 2, "test.y": 12}, 26)
     # ]
-    assert results[0][0].output.out == 13
-    assert results[0][1].output.out == 26
+    assert results[0].output.out == 13
+    assert results[1].output.out == 26
     # checking all directories
     assert wf.output_dir
     for odir in wf.output_dir:
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_4(plugin):
+def test_wf_ndst_4(plugin, tmpdir):
     """ workflow with two tasks, scalar splitter and combiner on tasks level"""
     wf = Workflow(name="wf_ndst_4", input_spec=["a", "b"])
     wf.add(multiply(name="mult", x=wf.lzin.a, y=wf.lzin.b).split(("x", "y")))
     wf.add(add2(name="add2", x=wf.mult.lzout.out).combine("mult.x"))
 
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
     wf.inputs.a = [1, 2]
     wf.inputs.b = [11, 12]
 
@@ -652,15 +835,14 @@ def test_wf_ndst_4(plugin):
 
     results = wf.result()
     # expected: [
-    #     [({"test7.x": 1, "test7.y": 11}, 13), ({"test7.x": 2, "test.y": 12}, 26)]
+    #     ({"test7.x": 1, "test7.y": 11}, 13), ({"test7.x": 2, "test.y": 12}, 26)
     # ]
-    assert results.output.out[0] == [13, 26]
+    assert results.output.out == [13, 26]
     # checking the output directory
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_5(plugin):
+def test_wf_st_5(plugin, tmpdir):
     """ workflow with two tasks, outer splitter and no combiner"""
     wf = Workflow(name="wf_st_5", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
@@ -668,7 +850,7 @@ def test_wf_st_5(plugin):
 
     wf.split(["x", "y"], x=[1, 2], y=[11, 12])
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -684,8 +866,7 @@ def test_wf_st_5(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_5(plugin):
+def test_wf_ndst_5(plugin, tmpdir):
     """ workflow with two tasks, outer splitter on tasks level and no combiner"""
     wf = Workflow(name="wf_ndst_5", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split(["x", "y"]))
@@ -693,7 +874,7 @@ def test_wf_ndst_5(plugin):
     wf.inputs.x = [1, 2]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -707,8 +888,7 @@ def test_wf_ndst_5(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_6(plugin):
+def test_wf_st_6(plugin, tmpdir):
     """ workflow with two tasks, outer splitter and combiner for the workflow"""
     wf = Workflow(name="wf_st_6", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
@@ -717,7 +897,7 @@ def test_wf_st_6(plugin):
     wf.split(["x", "y"], x=[1, 2, 3], y=[11, 12])
     wf.combine("x")
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -735,8 +915,7 @@ def test_wf_st_6(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_6(plugin):
+def test_wf_ndst_6(plugin, tmpdir):
     """ workflow with two tasks, outer splitter and combiner on tasks level"""
     wf = Workflow(name="wf_ndst_6", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split(["x", "y"]))
@@ -744,7 +923,7 @@ def test_wf_ndst_6(plugin):
     wf.inputs.x = [1, 2, 3]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -757,11 +936,104 @@ def test_wf_ndst_6(plugin):
     assert wf.output_dir.exists()
 
 
+def test_wf_ndst_7(plugin, tmpdir):
+    """ workflow with two tasks, outer splitter and (full) combiner for first node only"""
+    wf = Workflow(name="wf_ndst_6", input_spec=["x", "y"])
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split("x").combine("x"))
+    wf.add(identity(name="iden", x=wf.mult.lzout.out))
+    wf.inputs.x = [1, 2, 3]
+    wf.inputs.y = 11
+    wf.set_output([("out", wf.iden.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out == [11, 22, 33]
+
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
+def test_wf_ndst_8(plugin, tmpdir):
+    """ workflow with two tasks, outer splitter and (partial) combiner for first task only"""
+    wf = Workflow(name="wf_ndst_6", input_spec=["x", "y"])
+    wf.add(
+        multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split(["x", "y"]).combine("x")
+    )
+    wf.add(identity(name="iden", x=wf.mult.lzout.out))
+    wf.inputs.x = [1, 2, 3]
+    wf.inputs.y = [11, 12]
+    wf.set_output([("out", wf.iden.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out[0] == [11, 22, 33]
+    assert results.output.out[1] == [12, 24, 36]
+
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
+def test_wf_ndst_9(plugin, tmpdir):
+    """ workflow with two tasks, outer splitter and (full) combiner for first task only"""
+    wf = Workflow(name="wf_ndst_6", input_spec=["x", "y"])
+    wf.add(
+        multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y)
+        .split(["x", "y"])
+        .combine(["x", "y"])
+    )
+    wf.add(identity(name="iden", x=wf.mult.lzout.out))
+    wf.inputs.x = [1, 2, 3]
+    wf.inputs.y = [11, 12]
+    wf.set_output([("out", wf.iden.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out == [11, 12, 22, 24, 33, 36]
+
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
+# workflows with structures A ->  B -> C
+
+
+def test_wf_3sernd_ndst_1(plugin, tmpdir):
+    """ workflow with three "serial" tasks, checking if the splitter is propagating"""
+    wf = Workflow(name="wf_3sernd_ndst_1", input_spec=["x", "y"])
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split(["x", "y"]))
+    wf.add(add2(name="add2_1st", x=wf.mult.lzout.out))
+    wf.add(add2(name="add2_2nd", x=wf.add2_1st.lzout.out))
+    wf.inputs.x = [1, 2]
+    wf.inputs.y = [11, 12]
+    wf.set_output([("out", wf.add2_2nd.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out[0] == 15
+    assert results.output.out[1] == 16
+    assert results.output.out[2] == 26
+    assert results.output.out[3] == 28
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
 # workflows with structures A -> C, B -> C
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_7(plugin):
+@pytest.mark.flaky(reruns=3)  # when dask
+def test_wf_3nd_st_1(plugin_dask_opt, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter on the workflow level
     """
@@ -772,9 +1044,9 @@ def test_wf_st_7(plugin):
     wf.split(["x", "y"], x=[1, 2, 3], y=[11, 12])
 
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
-    with Submitter(plugin=plugin) as sub:
+    with Submitter(plugin=plugin_dask_opt) as sub:
         sub(wf)
 
     results = wf.result()
@@ -788,8 +1060,8 @@ def test_wf_st_7(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_7(plugin):
+@pytest.mark.flaky(reruns=3)  # when dask
+def test_wf_3nd_ndst_1(plugin_dask_opt, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter on the tasks levels
     """
@@ -800,9 +1072,9 @@ def test_wf_ndst_7(plugin):
     wf.inputs.x = [1, 2, 3]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
-    with Submitter(plugin=plugin) as sub:
+    with Submitter(plugin=plugin_dask_opt) as sub:
         sub(wf)
 
     results = wf.result()
@@ -812,8 +1084,7 @@ def test_wf_ndst_7(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_8(plugin):
+def test_wf_3nd_st_2(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter and partial combiner on the workflow level
     """
@@ -824,7 +1095,7 @@ def test_wf_st_8(plugin):
     wf.split(["x", "y"], x=[1, 2, 3], y=[11, 12]).combine("x")
 
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -843,8 +1114,7 @@ def test_wf_st_8(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_8(plugin):
+def test_wf_3nd_ndst_2(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter and partial combiner on the tasks levels
     """
@@ -860,6 +1130,7 @@ def test_wf_ndst_8(plugin):
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.mult.lzout.out)])
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -872,8 +1143,7 @@ def test_wf_ndst_8(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_9(plugin):
+def test_wf_3nd_st_3(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter and partial combiner (from the second task) on the workflow level
     """
@@ -884,7 +1154,7 @@ def test_wf_st_9(plugin):
     wf.split(["x", "y"], x=[1, 2, 3], y=[11, 12]).combine("y")
 
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -903,8 +1173,7 @@ def test_wf_st_9(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_9(plugin):
+def test_wf_3nd_ndst_3(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter and partial combiner (from the second task) on the tasks levels
     """
@@ -919,7 +1188,7 @@ def test_wf_ndst_9(plugin):
     wf.inputs.x = [1, 2, 3]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -933,8 +1202,7 @@ def test_wf_ndst_9(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_10(plugin):
+def test_wf_3nd_st_4(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter and full combiner on the workflow level
     """
@@ -945,26 +1213,26 @@ def test_wf_st_10(plugin):
     wf.split(["x", "y"], x=[1, 2, 3], y=[11, 12]).combine(["x", "y"])
     wf.set_output([("out", wf.mult.lzout.out)])
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
     results = wf.result()
-    assert len(results) == 1
-    assert results[0][0].output.out == 39
-    assert results[0][1].output.out == 42
-    assert results[0][2].output.out == 52
-    assert results[0][3].output.out == 56
-    assert results[0][4].output.out == 65
-    assert results[0][5].output.out == 70
+    assert len(results) == 6
+    assert results[0].output.out == 39
+    assert results[1].output.out == 42
+    assert results[2].output.out == 52
+    assert results[3].output.out == 56
+    assert results[4].output.out == 65
+    assert results[5].output.out == 70
     # checking all directories
     assert wf.output_dir
     for odir in wf.output_dir:
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_10(plugin):
+def test_wf_3nd_ndst_4(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter and full combiner on the tasks levels
     """
@@ -979,15 +1247,114 @@ def test_wf_ndst_10(plugin):
     wf.inputs.x = [1, 2, 3]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
     # assert wf.output_dir.exists()
     results = wf.result()
 
-    assert len(results.output.out) == 1
-    assert results.output.out == [[39, 42, 52, 56, 65, 70]]
+    assert len(results.output.out) == 6
+    assert results.output.out == [39, 42, 52, 56, 65, 70]
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
+def test_wf_3nd_st_5(plugin, tmpdir):
+    """ workflow with three tasks (A->C, B->C) and three fields in the splitter,
+        splitter and partial combiner (from the second task) on the workflow level
+    """
+    wf = Workflow(name="wf_st_9", input_spec=["x", "y", "z"])
+    wf.add(add2(name="add2x", x=wf.lzin.x))
+    wf.add(add2(name="add2y", x=wf.lzin.y))
+    wf.add(
+        fun_addvar3(
+            name="addvar", a=wf.add2x.lzout.out, b=wf.add2y.lzout.out, c=wf.lzin.z
+        )
+    )
+    wf.split(["x", "y", "z"], x=[2, 3], y=[11, 12], z=[10, 100]).combine("y")
+
+    wf.set_output([("out", wf.addvar.lzout.out)])
+    wf.plugin = plugin
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert len(results) == 4
+    assert results[0][0].output.out == 27
+    assert results[0][1].output.out == 28
+    assert results[1][0].output.out == 117
+    assert results[1][1].output.out == 118
+    assert results[2][0].output.out == 28
+    assert results[2][1].output.out == 29
+    assert results[3][0].output.out == 118
+    assert results[3][1].output.out == 119
+
+    # checking all directories
+    assert wf.output_dir
+    for odir in wf.output_dir:
+        assert odir.exists()
+
+
+def test_wf_3nd_ndst_5(plugin, tmpdir):
+    """ workflow with three tasks (A->C, B->C) and three fields in the splitter,
+        all tasks have splitters and the last one has a partial combiner (from the 2nd)
+    """
+    wf = Workflow(name="wf_st_9", input_spec=["x", "y", "z"])
+    wf.add(add2(name="add2x", x=wf.lzin.x).split("x"))
+    wf.add(add2(name="add2y", x=wf.lzin.y).split("x"))
+    wf.add(
+        fun_addvar3(
+            name="addvar", a=wf.add2x.lzout.out, b=wf.add2y.lzout.out, c=wf.lzin.z
+        )
+        .split("c")
+        .combine("add2x.x")
+    )
+    wf.inputs.x = [2, 3]
+    wf.inputs.y = [11, 12]
+    wf.inputs.z = [10, 100]
+
+    wf.set_output([("out", wf.addvar.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert len(results.output.out) == 4
+    assert results.output.out[0] == [27, 28]
+    assert results.output.out[1] == [117, 118]
+    assert results.output.out[2] == [28, 29]
+    assert results.output.out[3] == [118, 119]
+
+    # checking all directories
+    assert wf.output_dir.exists()
+
+
+def test_wf_3nd_ndst_6(plugin, tmpdir):
+    """ workflow with three tasks, third one connected to two previous tasks,
+        the third one uses scalar splitter from the previous ones and a combiner
+    """
+    wf = Workflow(name="wf_ndst_9", input_spec=["x", "y"])
+    wf.add(add2(name="add2x", x=wf.lzin.x).split("x"))
+    wf.add(add2(name="add2y", x=wf.lzin.y).split("x"))
+    wf.add(
+        multiply(name="mult", x=wf.add2x.lzout.out, y=wf.add2y.lzout.out)
+        .split(("_add2x", "_add2y"))
+        .combine("add2y.x")
+    )
+    wf.inputs.x = [1, 2]
+    wf.inputs.y = [11, 12]
+    wf.set_output([("out", wf.mult.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out == [39, 56]
     # checking the output directory
     assert wf.output_dir.exists()
 
@@ -995,8 +1362,7 @@ def test_wf_ndst_10(plugin):
 # workflows with Left and Right part in splitters A -> B (L&R parts of the splitter)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstLR_1(plugin):
+def test_wf_ndstLR_1(plugin, tmpdir):
     """ Test workflow with 2 tasks, splitters on tasks levels
         The second task has its own simple splitter
         and the  Left part from the first task should be added
@@ -1007,7 +1373,7 @@ def test_wf_ndstLR_1(plugin):
     wf.inputs.x = [1, 2]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1024,8 +1390,7 @@ def test_wf_ndstLR_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstLR_1a(plugin):
+def test_wf_ndstLR_1a(plugin, tmpdir):
     """ Test workflow with 2 tasks, splitters on tasks levels
         The second task has splitter that has Left part (from previous state)
         and the Right part (it's onw splitter)
@@ -1038,7 +1403,7 @@ def test_wf_ndstLR_1a(plugin):
     wf.inputs.x = [1, 2]
     wf.inputs.y = [11, 12]
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1055,8 +1420,7 @@ def test_wf_ndstLR_1a(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstLR_2(plugin):
+def test_wf_ndstLR_2(plugin, tmpdir):
     """ Test workflow with 2 tasks, splitters on tasks levels
         The second task has its own outer splitter
         and the  Left part from the first task should be added
@@ -1072,7 +1436,7 @@ def test_wf_ndstLR_2(plugin):
     wf.inputs.y = [10, 20]
     wf.inputs.z = [100, 200]
     wf.set_output([("out", wf.addvar.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1105,8 +1469,7 @@ def test_wf_ndstLR_2(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstLR_2a(plugin):
+def test_wf_ndstLR_2a(plugin, tmpdir):
     """ Test workflow with 2 tasks, splitters on tasks levels
         The second task has splitter that has Left part (from previous state)
         and the Right part (it's onw outer splitter)
@@ -1122,7 +1485,7 @@ def test_wf_ndstLR_2a(plugin):
     wf.inputs.y = [10, 20]
     wf.inputs.z = [100, 200]
     wf.set_output([("out", wf.addvar.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1158,8 +1521,7 @@ def test_wf_ndstLR_2a(plugin):
 # workflows with inner splitters A -> B (inner spl)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstinner_1(plugin):
+def test_wf_ndstinner_1(plugin, tmpdir):
     """ workflow with 2 tasks,
         the second task has inner splitter
     """
@@ -1168,7 +1530,7 @@ def test_wf_ndstinner_1(plugin):
     wf.add(add2(name="add2", x=wf.list.lzout.out).split("x"))
     wf.inputs.x = 1
     wf.set_output([("out_list", wf.list.lzout.out), ("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1183,8 +1545,7 @@ def test_wf_ndstinner_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstinner_2(plugin):
+def test_wf_ndstinner_2(plugin, tmpdir):
     """ workflow with 2 tasks,
         the second task has two inputs and inner splitter from one of the input
     """
@@ -1194,7 +1555,7 @@ def test_wf_ndstinner_2(plugin):
     wf.inputs.x = 1
     wf.inputs.y = 10
     wf.set_output([("out_list", wf.list.lzout.out), ("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1209,8 +1570,7 @@ def test_wf_ndstinner_2(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstinner_3(plugin):
+def test_wf_ndstinner_3(plugin, tmpdir):
     """ workflow with 2 tasks,
         the second task has two inputs and outer splitter that includes an inner field
     """
@@ -1220,7 +1580,7 @@ def test_wf_ndstinner_3(plugin):
     wf.inputs.x = 1
     wf.inputs.y = [10, 100]
     wf.set_output([("out_list", wf.list.lzout.out), ("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1235,8 +1595,7 @@ def test_wf_ndstinner_3(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndstinner_4(plugin):
+def test_wf_ndstinner_4(plugin, tmpdir):
     """ workflow with 3 tasks,
         the second task has two inputs and inner splitter from one of the input,
         the third task has no its own splitter
@@ -1248,7 +1607,7 @@ def test_wf_ndstinner_4(plugin):
     wf.inputs.x = 1
     wf.inputs.y = 10
     wf.set_output([("out_list", wf.list.lzout.out), ("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1268,8 +1627,7 @@ def test_wf_ndstinner_4(plugin):
 # workflow that have some single values as the input
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_singl_1(plugin):
+def test_wf_st_singl_1(plugin, tmpdir):
     """ workflow with two tasks, only one input is in the splitter and combiner"""
     wf = Workflow(name="wf_st_5", input_spec=["x", "y"])
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
@@ -1278,22 +1636,21 @@ def test_wf_st_singl_1(plugin):
     wf.split("x", x=[1, 2], y=11)
     wf.combine("x")
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
     results = wf.result()
-    assert results[0][0].output.out == 13
-    assert results[0][1].output.out == 24
+    assert results[0].output.out == 13
+    assert results[1].output.out == 24
     # checking all directories
     assert wf.output_dir
     for odir in wf.output_dir:
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_singl_1(plugin):
+def test_wf_ndst_singl_1(plugin, tmpdir):
     """ workflow with two tasks, outer splitter and combiner on tasks level;
         only one input is part of the splitter, the other is a single value
     """
@@ -1303,19 +1660,18 @@ def test_wf_ndst_singl_1(plugin):
     wf.inputs.x = [1, 2]
     wf.inputs.y = 11
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
 
     results = wf.result()
-    assert results.output.out[0] == [13, 24]
+    assert results.output.out == [13, 24]
     # checking the output directory
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_st_singl_2(plugin):
+def test_wf_st_singl_2(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter on the workflow level
         only one input is part of the splitter, the other is a single value
@@ -1327,7 +1683,7 @@ def test_wf_st_singl_2(plugin):
     wf.split("x", x=[1, 2, 3], y=11)
 
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1343,8 +1699,7 @@ def test_wf_st_singl_2(plugin):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_ndst_singl_2(plugin):
+def test_wf_ndst_singl_2(plugin, tmpdir):
     """ workflow with three tasks, third one connected to two previous tasks,
         splitter on the tasks levels
         only one input is part of the splitter, the other is a single value
@@ -1356,7 +1711,7 @@ def test_wf_ndst_singl_2(plugin):
     wf.inputs.x = [1, 2, 3]
     wf.inputs.y = 11
     wf.set_output([("out", wf.mult.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1371,8 +1726,7 @@ def test_wf_ndst_singl_2(plugin):
 # workflows with structures wf(A)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_1(plugin):
+def test_wfasnd_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task and no splitter
     """
@@ -1384,7 +1738,7 @@ def test_wfasnd_1(plugin):
     wf = Workflow(name="wf", input_spec=["x"])
     wf.add(wfnd)
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1395,8 +1749,7 @@ def test_wfasnd_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_wfinp_1(plugin):
+def test_wfasnd_wfinp_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task and no splitter
         input set for the main workflow
@@ -1409,7 +1762,7 @@ def test_wfasnd_wfinp_1(plugin):
     wf.add(wfnd)
     wf.inputs.x = 2
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -1422,8 +1775,7 @@ def test_wfasnd_wfinp_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_wfndupdate(plugin):
+def test_wfasnd_wfndupdate(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task and no splitter
         wfasnode input is updated to use the main workflow input
@@ -1437,7 +1789,7 @@ def test_wfasnd_wfndupdate(plugin):
     wfnd.inputs.x = wf.lzin.x
     wf.add(wfnd)
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1447,8 +1799,7 @@ def test_wfasnd_wfndupdate(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_wfndupdate_rerun(plugin):
+def test_wfasnd_wfndupdate_rerun(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task and no splitter
         wfasnode is run first and later is
@@ -1458,6 +1809,7 @@ def test_wfasnd_wfndupdate_rerun(plugin):
     wfnd = Workflow(name="wfnd", input_spec=["x"], x=2)
     wfnd.add(add2(name="add2", x=wfnd.lzin.x))
     wfnd.set_output([("out", wfnd.add2.lzout.out)])
+    wfnd.cache_dir = tmpdir
     with Submitter(plugin=plugin) as sub:
         sub(wfnd)
 
@@ -1468,7 +1820,7 @@ def test_wfasnd_wfndupdate_rerun(plugin):
     # trying to set after add...
     wf.wfnd.inputs.x = wf.lzin.x
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1482,7 +1834,7 @@ def test_wfasnd_wfndupdate_rerun(plugin):
     wf.inputs.x = wf_o.lzin.x
     wf_o.add(wf)
     wf_o.set_output([("out", wf_o.wf.lzout.out)])
-    wf_o.plugin = plugin
+    wf_o.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf_o)
@@ -1492,8 +1844,7 @@ def test_wfasnd_wfndupdate_rerun(plugin):
     assert wf_o.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_st_1(plugin):
+def test_wfasnd_st_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task,
         splitter for wfnd
@@ -1507,7 +1858,7 @@ def test_wfasnd_st_1(plugin):
     wf = Workflow(name="wf", input_spec=["x"])
     wf.add(wfnd)
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     checksum_before = wf.checksum
     with Submitter(plugin=plugin) as sub:
@@ -1520,8 +1871,7 @@ def test_wfasnd_st_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_st_updatespl_1(plugin):
+def test_wfasnd_st_updatespl_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task,
         splitter for wfnd is set after add
@@ -1535,7 +1885,7 @@ def test_wfasnd_st_updatespl_1(plugin):
     wf.add(wfnd)
     wfnd.split("x")
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1546,8 +1896,7 @@ def test_wfasnd_st_updatespl_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_ndst_1(plugin):
+def test_wfasnd_ndst_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task,
         splitter for node
@@ -1562,7 +1911,7 @@ def test_wfasnd_ndst_1(plugin):
     wf = Workflow(name="wf", input_spec=["x"])
     wf.add(wfnd)
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1573,8 +1922,7 @@ def test_wfasnd_ndst_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_ndst_updatespl_1(plugin):
+def test_wfasnd_ndst_updatespl_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task,
         splitter for node added after add
@@ -1583,14 +1931,13 @@ def test_wfasnd_ndst_updatespl_1(plugin):
     wfnd.add(add2(name="add2", x=wfnd.lzin.x))
     wfnd.set_output([("out", wfnd.add2.lzout.out)])
     # TODO: without this the test is failing
-    wfnd.plugin = plugin
     wfnd.inputs.x = [2, 4]
 
     wf = Workflow(name="wf", input_spec=["x"])
     wf.add(wfnd)
     wfnd.add2.split("x")
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1601,13 +1948,12 @@ def test_wfasnd_ndst_updatespl_1(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_wfst_1(plugin):
+def test_wfasnd_wfst_1(plugin, tmpdir):
     """ workflow as a node
         workflow-node with one task,
         splitter for the main workflow
     """
-    wf = Workflow(name="wf", input_spec=["x"])
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
     wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.lzin.x)
     wfnd.add(add2(name="add2", x=wfnd.lzin.x))
     wfnd.set_output([("out", wfnd.add2.lzout.out)])
@@ -1616,7 +1962,6 @@ def test_wfasnd_wfst_1(plugin):
     wf.split("x")
     wf.inputs.x = [2, 4]
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1633,8 +1978,7 @@ def test_wfasnd_wfst_1(plugin):
 # workflows with structures wf(A) -> B
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_st_2(plugin):
+def test_wfasnd_st_2(plugin, tmpdir):
     """ workflow as a node,
         the main workflow has two tasks,
         splitter for wfnd
@@ -1650,7 +1994,7 @@ def test_wfasnd_st_2(plugin):
     wf.add(wfnd)
     wf.add(add2(name="add2", x=wf.wfnd.lzout.out))
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1661,8 +2005,7 @@ def test_wfasnd_st_2(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_wfst_2(plugin):
+def test_wfasnd_wfst_2(plugin, tmpdir):
     """ workflow as a node,
         the main workflow has two tasks,
         splitter for the main workflow
@@ -1678,7 +2021,7 @@ def test_wfasnd_wfst_2(plugin):
     wf.inputs.x = [2, 4]
     wf.inputs.y = [1, 10]
     wf.set_output([("out", wf.add2.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1695,8 +2038,7 @@ def test_wfasnd_wfst_2(plugin):
 # workflows with structures A -> wf(B)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_ndst_3(plugin):
+def test_wfasnd_ndst_3(plugin, tmpdir):
     """ workflow as the second node,
         the main workflow has two tasks,
         splitter for the first task
@@ -1712,7 +2054,7 @@ def test_wfasnd_ndst_3(plugin):
     wf.add(wfnd)
 
     wf.set_output([("out", wf.wfnd.lzout.out)])
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1723,8 +2065,7 @@ def test_wfasnd_ndst_3(plugin):
     assert wf.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wfasnd_wfst_3(plugin):
+def test_wfasnd_wfst_3(plugin, tmpdir):
     """ workflow as the second node,
         the main workflow has two tasks,
         splitter for the main workflow
@@ -1742,6 +2083,7 @@ def test_wfasnd_wfst_3(plugin):
 
     wf.set_output([("out", wf.wfnd.lzout.out)])
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1755,10 +2097,90 @@ def test_wfasnd_wfst_3(plugin):
         assert odir.exists()
 
 
+# workflows with structures wfns(A->B)
+
+
+def test_wfasnd_4(plugin, tmpdir):
+    """ workflow as a node
+        workflow-node with two tasks and no splitter
+    """
+    wfnd = Workflow(name="wfnd", input_spec=["x"])
+    wfnd.add(add2(name="add2_1st", x=wfnd.lzin.x))
+    wfnd.add(add2(name="add2_2nd", x=wfnd.add2_1st.lzout.out))
+    wfnd.set_output([("out", wfnd.add2_2nd.lzout.out)])
+    wfnd.inputs.x = 2
+
+    wf = Workflow(name="wf", input_spec=["x"])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out == 6
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
+def test_wfasnd_ndst_4(plugin, tmpdir):
+    """ workflow as a node
+        workflow-node with two tasks,
+        splitter for node
+    """
+    wfnd = Workflow(name="wfnd", input_spec=["x"])
+    wfnd.add(add2(name="add2_1st", x=wfnd.lzin.x).split("x"))
+    wfnd.add(add2(name="add2_2nd", x=wfnd.add2_1st.lzout.out))
+    wfnd.set_output([("out", wfnd.add2_2nd.lzout.out)])
+    wfnd.inputs.x = [2, 4]
+
+    wf = Workflow(name="wf", input_spec=["x"])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+    wf.cache_dir = tmpdir
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+
+    results = wf.result()
+    assert results.output.out == [6, 8]
+    # checking the output directory
+    assert wf.output_dir.exists()
+
+
+def test_wfasnd_wfst_4(plugin, tmpdir):
+    """ workflow as a node
+        workflow-node with two tasks,
+        splitter for the main workflow
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.lzin.x)
+    wfnd.add(add2(name="add2_1st", x=wfnd.lzin.x))
+    wfnd.add(add2(name="add2_2nd", x=wfnd.add2_1st.lzout.out))
+    wfnd.set_output([("out", wfnd.add2_2nd.lzout.out)])
+
+    wf.add(wfnd)
+    wf.split("x")
+    wf.inputs.x = [2, 4]
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+    # assert wf.output_dir.exists()
+    results = wf.result()
+    assert results[0].output.out == 6
+    assert results[1].output.out == 8
+    # checking all directories
+    assert wf.output_dir
+    for odir in wf.output_dir:
+        assert odir.exists()
+
+
 # Testing caching
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_nostate_cachedir(plugin, tmpdir):
     """ wf with provided cache_dir using pytest tmpdir"""
     cache_dir = tmpdir.mkdir("test_wf_cache_1")
@@ -1769,7 +2191,6 @@ def test_wf_nostate_cachedir(plugin, tmpdir):
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1781,11 +2202,12 @@ def test_wf_nostate_cachedir(plugin, tmpdir):
     shutil.rmtree(cache_dir)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_nostate_cachedir_relativepath(tmpdir, plugin):
     """ wf with provided cache_dir as relative path"""
     tmpdir.chdir()
     cache_dir = "test_wf_cache_2"
+    tmpdir.mkdir(cache_dir)
 
     wf = Workflow(name="wf_2", input_spec=["x", "y"], cache_dir=cache_dir)
     wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
@@ -1793,7 +2215,6 @@ def test_wf_nostate_cachedir_relativepath(tmpdir, plugin):
     wf.set_output([("out", wf.add2.lzout.out)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -1805,11 +2226,127 @@ def test_wf_nostate_cachedir_relativepath(tmpdir, plugin):
     shutil.rmtree(cache_dir)
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_nostate_cachelocations(plugin, tmpdir):
     """
     Two identical wfs with provided cache_dir;
     the second wf has cache_locations and should not recompute the results
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out
+
+    wf2 = Workflow(
+        name="wf",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out
+
+    # checking execution time (for unix and cf)
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
+
+    # checking if the second wf didn't run again
+    assert wf1.output_dir.exists()
+    assert not wf2.output_dir.exists()
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_a(plugin, tmpdir):
+    """
+    the same as previous test, but workflows names differ;
+    the task should not be run and it should be fast,
+    but the wf itself is triggered and the new output dir is created
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf1", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+    wf1.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out
+
+    wf2 = Workflow(
+        name="wf2",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+    wf2.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out
+
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking execution time (second one should be quick)
+        assert t1 > 2
+        # testing relative values (windows or slurm takes much longer to create wf itself)
+        assert t2 < max(1, t1 - 1)
+
+    # checking if both wf.output_dir are created
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_b(plugin, tmpdir):
+    """
+    the same as previous test, but the 2nd workflows has two outputs
+    (connected to the same task output);
+    the task should not be run and it should be fast,
+    but the wf itself is triggered and the new output dir is created
     """
     cache_dir1 = tmpdir.mkdir("test_wf_cache3")
     cache_dir2 = tmpdir.mkdir("test_wf_cache4")
@@ -1839,6 +2376,8 @@ def test_wf_nostate_cachelocations(plugin, tmpdir):
     wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
     wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
     wf2.set_output([("out", wf2.add2.lzout.out)])
+    # additional output
+    wf2.set_output([("out_pr", wf2.add2.lzout.out)])
     wf2.inputs.x = 2
     wf2.inputs.y = 3
     wf2.plugin = plugin
@@ -1849,18 +2388,136 @@ def test_wf_nostate_cachelocations(plugin, tmpdir):
     t2 = time.time() - t0
 
     results2 = wf2.result()
-    assert 8 == results2.output.out
+    assert 8 == results2.output.out == results2.output.out_pr
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 < 0.5
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # execution time for second run should be much shorter
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
     # checking if the second wf didn't run again
     assert wf1.output_dir.exists()
-    assert not wf2.output_dir.exists()
+    assert wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_setoutputchange(plugin, tmpdir):
+    """
+    the same as previous test, but wf output names differ,
+    the tasks should not be run and it should be fast,
+    but the wf itself is triggered and the new output dir is created
+    (the second wf has updated name in its Output)
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out1", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+    wf1.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out1
+
+    wf2 = Workflow(
+        name="wf",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.set_output([("out2", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+    wf2.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out2
+
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking execution time (the second wf should be fast, nodes do not have to rerun)
+        assert t1 > 2
+        # testing relative values (windows or slurm takes much longer to create wf itself)
+        assert t2 < max(1, t1 - 1)
+
+    # both wf output_dirs should be created
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_setoutputchange_a(plugin, tmpdir):
+    """
+    the same as previous test, but wf names and output names differ,
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf1", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out1", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+    wf1.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out1
+
+    wf2 = Workflow(
+        name="wf2",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.set_output([("out2", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+    wf2.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out2
+
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        assert t1 > 2
+        # testing relative values (windows or slurm takes much longer to create wf itself)
+        assert t2 < max(1, t1 - 1)
+
+    # both wf output_dirs should be created
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+
+
+@pytest.mark.flaky(reruns=3)
 def test_wf_nostate_cachelocations_forcererun(plugin, tmpdir):
     """
     Two identical wfs with provided cache_dir;
@@ -1907,16 +2564,303 @@ def test_wf_nostate_cachelocations_forcererun(plugin, tmpdir):
     results2 = wf2.result()
     assert 8 == results2.output.out
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 > 3
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking execution time
+        assert t1 > 2
+        assert t2 > 2
 
     # checking if the second wf didn't run again
     assert wf1.output_dir.exists()
     assert wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_wftaskrerun_propagateTrue(plugin, tmpdir):
+    """
+    Two identical wfs with provided cache_dir and cache_locations for the second one;
+    submitter doesn't have rerun, but the second wf has rerun=True,
+    propagate_rerun is True as default, so everything should be rerun
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+    wf1.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out
+
+    wf2 = Workflow(
+        name="wf",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+        rerun=True,  # wh has to be rerun (default for propagate_rerun is True)
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+    wf2.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out
+
+    # checking if the second wf runs again
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+
+    # everything has to be recomputed
+    assert len(list(Path(cache_dir1).glob("F*"))) == 2
+    assert len(list(Path(cache_dir2).glob("F*"))) == 2
+
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # runtime for recomputed workflows should be about the same
+        assert abs(t1 - t2) < t1 / 2
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_wftaskrerun_propagateFalse(plugin, tmpdir):
+    """
+    Two identical wfs with provided cache_dir and cache_locations for the second one;
+    submitter doesn't have rerun, but the second wf has rerun=True,
+    propagate_rerun is set to False, so wf will be triggered,
+    but tasks will not have rerun, so will use the previous results
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+    wf1.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out
+
+    wf2 = Workflow(
+        name="wf",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+        rerun=True,  # wh has to be rerun
+        propagate_rerun=False,  # but rerun doesn't propagate to the tasks
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+    wf2.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out
+
+    # checking if the second wf runs again
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
+
+    # tasks should not be recomputed
+    assert len(list(Path(cache_dir1).glob("F*"))) == 2
+    assert len(list(Path(cache_dir2).glob("F*"))) == 0
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_cachelocations_taskrerun_wfrerun_propagateFalse(plugin, tmpdir):
+    """
+    Two identical wfs with provided cache_dir, and cache_locations for the second wf;
+    submitter doesn't have rerun, but wf has rerun=True,
+    since propagate_rerun=False, only tasks that have rerun=True will be rerun
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir1)
+    wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
+    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 2
+    wf1.inputs.y = 3
+    wf1.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+    t1 = time.time() - t0
+
+    results1 = wf1.result()
+    assert 8 == results1.output.out
+
+    wf2 = Workflow(
+        name="wf",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+        rerun=True,
+        propagate_rerun=False,  # rerun will not be propagated to each task
+    )
+    wf2.add(multiply(name="mult", x=wf2.lzin.x, y=wf2.lzin.y))
+    # rerun on the task level needed (wf.propagate_rerun is False)
+    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out, rerun=True))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.inputs.y = 3
+    wf2.plugin = plugin
+
+    t0 = time.time()
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+    t2 = time.time() - t0
+
+    results2 = wf2.result()
+    assert 8 == results2.output.out
+
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+    # the second task should be recomputed
+    assert len(list(Path(cache_dir1).glob("F*"))) == 2
+    assert len(list(Path(cache_dir2).glob("F*"))) == 1
+
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 > 2
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_nodecachelocations(plugin, tmpdir):
+    """
+    Two wfs with different input, but the second node has the same input;
+    the second wf has cache_locations and should recompute the wf,
+    but without recomputing the second node
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x"], cache_dir=cache_dir1)
+    wf1.add(ten(name="ten", x=wf1.lzin.x))
+    wf1.add(add2(name="add2", x=wf1.ten.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 3
+    wf1.plugin = plugin
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+
+    results1 = wf1.result()
+    assert 12 == results1.output.out
+
+    wf2 = Workflow(
+        name="wf",
+        input_spec=["x", "y"],
+        cache_dir=cache_dir2,
+        cache_locations=cache_dir1,
+    )
+    wf2.add(ten(name="ten", x=wf2.lzin.x))
+    wf2.add(add2(name="add2", x=wf2.ten.lzout.out))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.plugin = plugin
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+
+    results2 = wf2.result()
+    assert 12 == results2.output.out
+
+    # checking if the second wf runs again, but runs only one task
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+    # the second wf should rerun one task
+    assert len(list(Path(cache_dir1).glob("F*"))) == 2
+    assert len(list(Path(cache_dir2).glob("F*"))) == 1
+
+
+@pytest.mark.flaky(reruns=3)
+def test_wf_nostate_nodecachelocations_upd(plugin, tmpdir):
+    """
+    Two wfs with different input, but the second node has the same input;
+    the second wf has cache_locations (set after adding tasks) and should recompute,
+    but without recomputing the second node
+    """
+    cache_dir1 = tmpdir.mkdir("test_wf_cache3")
+    cache_dir2 = tmpdir.mkdir("test_wf_cache4")
+
+    wf1 = Workflow(name="wf", input_spec=["x"], cache_dir=cache_dir1)
+    wf1.add(ten(name="ten", x=wf1.lzin.x))
+    wf1.add(add2(name="add2", x=wf1.ten.lzout.out))
+    wf1.set_output([("out", wf1.add2.lzout.out)])
+    wf1.inputs.x = 3
+    wf1.plugin = plugin
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf1)
+
+    results1 = wf1.result()
+    assert 12 == results1.output.out
+
+    wf2 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir2)
+    wf2.add(ten(name="ten", x=wf2.lzin.x))
+    wf2.add(add2(name="add2", x=wf2.ten.lzout.out))
+    wf2.set_output([("out", wf2.add2.lzout.out)])
+    wf2.inputs.x = 2
+    wf2.plugin = plugin
+    # updating cache_locations after adding the tasks
+    wf2.cache_locations = cache_dir1
+
+    with Submitter(plugin=plugin) as sub:
+        sub(wf2)
+
+    results2 = wf2.result()
+    assert 12 == results2.output.out
+
+    # checking if the second wf runs again, but runs only one task
+    assert wf1.output_dir.exists()
+    assert wf2.output_dir.exists()
+    # the second wf should have only one task run
+    assert len(list(Path(cache_dir1).glob("F*"))) == 2
+    assert len(list(Path(cache_dir2).glob("F*"))) == 1
+
+
+@pytest.mark.flaky(reruns=3)
 def test_wf_state_cachelocations(plugin, tmpdir):
     """
     Two identical wfs (with states) with provided cache_dir;
@@ -1966,9 +2910,11 @@ def test_wf_state_cachelocations(plugin, tmpdir):
     assert results2[0].output.out == 8
     assert results2[1].output.out == 82
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 < 0.5
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
     # checking all directories
     assert wf1.output_dir
@@ -1981,7 +2927,7 @@ def test_wf_state_cachelocations(plugin, tmpdir):
         assert not odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_state_cachelocations_forcererun(plugin, tmpdir):
     """
     Two identical wfs (with states) with provided cache_dir;
@@ -2032,9 +2978,11 @@ def test_wf_state_cachelocations_forcererun(plugin, tmpdir):
     assert results2[0].output.out == 8
     assert results2[1].output.out == 82
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 > 3
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 > 2
 
     # checking all directories
     assert wf1.output_dir
@@ -2047,7 +2995,7 @@ def test_wf_state_cachelocations_forcererun(plugin, tmpdir):
         assert odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_state_cachelocations_updateinp(plugin, tmpdir):
     """
     Two identical wfs (with states) with provided cache_dir;
@@ -2100,9 +3048,11 @@ def test_wf_state_cachelocations_updateinp(plugin, tmpdir):
     assert results2[0].output.out == 8
     assert results2[1].output.out == 82
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 < 0.5
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
     # checking all directories
     assert wf1.output_dir
@@ -2115,7 +3065,7 @@ def test_wf_state_cachelocations_updateinp(plugin, tmpdir):
         assert not odir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_state_n_nostate_cachelocations(plugin, tmpdir):
     """
     Two wfs with provided cache_dir, the first one has no state, the second has;
@@ -2166,7 +3116,6 @@ def test_wf_state_n_nostate_cachelocations(plugin, tmpdir):
     assert wf2.output_dir[1].exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
 def test_wf_nostate_cachelocations_updated(plugin, tmpdir):
     """
     Two identical wfs with provided cache_dir;
@@ -2216,36 +3165,37 @@ def test_wf_nostate_cachelocations_updated(plugin, tmpdir):
     results2 = wf2.result()
     assert 8 == results2.output.out
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 > 3
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 > 2
 
     # checking if both wf run
     assert wf1.output_dir.exists()
     assert wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_nostate_cachelocations_recompute(plugin, tmpdir):
     """
     Two wfs with the same inputs but slightly different graph;
-    the second wf should recompute the results
+    the second wf should recompute the results,
+    but the second node should use the results from the first wf (has the same input)
     """
     cache_dir1 = tmpdir.mkdir("test_wf_cache3")
     cache_dir2 = tmpdir.mkdir("test_wf_cache4")
 
     wf1 = Workflow(name="wf", input_spec=["x", "y"], cache_dir=cache_dir1)
     wf1.add(multiply(name="mult", x=wf1.lzin.x, y=wf1.lzin.y))
-    wf1.add(add2_wait(name="add2", x=wf1.mult.lzout.out))
+    wf1.add(add2(name="add2", x=wf1.mult.lzout.out))
     wf1.set_output([("out", wf1.add2.lzout.out)])
     wf1.inputs.x = 2
     wf1.inputs.y = 3
     wf1.plugin = plugin
 
-    t0 = time.time()
     with Submitter(plugin=plugin) as sub:
         sub(wf1)
-    t1 = time.time() - t0
 
     results1 = wf1.result()
     assert 8 == results1.output.out
@@ -2258,30 +3208,28 @@ def test_wf_nostate_cachelocations_recompute(plugin, tmpdir):
     )
     # different argument assigment
     wf2.add(multiply(name="mult", x=wf2.lzin.y, y=wf2.lzin.x))
-    wf2.add(add2_wait(name="add2", x=wf2.mult.lzout.out))
+    wf2.add(add2(name="add2", x=wf2.mult.lzout.out))
     wf2.set_output([("out", wf2.add2.lzout.out)])
     wf2.inputs.x = 2
     wf2.inputs.y = 3
     wf2.plugin = plugin
 
-    t0 = time.time()
     with Submitter(plugin=plugin) as sub:
         sub(wf2)
-    t2 = time.time() - t0
 
     results2 = wf2.result()
     assert 8 == results2.output.out
-
-    # checking execution time
-    assert t1 > 3
-    assert t2 > 3
 
     # checking if both dir exists
     assert wf1.output_dir.exists()
     assert wf2.output_dir.exists()
 
+    # the second wf should have only one task run
+    assert len(list(Path(cache_dir1).glob("F*"))) == 2
+    assert len(list(Path(cache_dir2).glob("F*"))) == 1
 
-@pytest.mark.parametrize("plugin", Plugins)
+
+@pytest.mark.flaky(reruns=3)
 def test_wf_ndstate_cachelocations(plugin, tmpdir):
     """
     Two wfs with identical inputs and node states;
@@ -2331,9 +3279,11 @@ def test_wf_ndstate_cachelocations(plugin, tmpdir):
     results2 = wf2.result()
     assert results2.output.out == [8, 82]
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 < 0.5
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
     # checking all directories
     assert wf1.output_dir.exists()
@@ -2343,7 +3293,7 @@ def test_wf_ndstate_cachelocations(plugin, tmpdir):
     assert not wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_ndstate_cachelocations_forcererun(plugin, tmpdir):
     """
     Two wfs with identical inputs and node states;
@@ -2394,9 +3344,11 @@ def test_wf_ndstate_cachelocations_forcererun(plugin, tmpdir):
     results2 = wf2.result()
     assert results2.output.out == [8, 82]
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 > 3
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 > 2
 
     # checking all directories
     assert wf1.output_dir.exists()
@@ -2405,7 +3357,7 @@ def test_wf_ndstate_cachelocations_forcererun(plugin, tmpdir):
     assert wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_ndstate_cachelocations_updatespl(plugin, tmpdir):
     """
     Two wfs with identical inputs and node state (that is set after adding the node!);
@@ -2455,9 +3407,11 @@ def test_wf_ndstate_cachelocations_updatespl(plugin, tmpdir):
     results2 = wf2.result()
     assert results2.output.out == [8, 82]
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 < 0.5
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
     # checking all directories
     assert wf1.output_dir.exists()
@@ -2467,7 +3421,7 @@ def test_wf_ndstate_cachelocations_updatespl(plugin, tmpdir):
     assert not wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_ndstate_cachelocations_recompute(plugin, tmpdir):
     """
     Two wfs (with nodes with states) with provided cache_dir;
@@ -2517,9 +3471,11 @@ def test_wf_ndstate_cachelocations_recompute(plugin, tmpdir):
     results2 = wf2.result()
     assert results2.output.out == [8, 10, 62, 82]
 
-    # checking execution time
-    assert t1 > 3
-    assert t2 > 3
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 > 2
 
     # checking all directories
     assert wf1.output_dir.exists()
@@ -2529,7 +3485,7 @@ def test_wf_ndstate_cachelocations_recompute(plugin, tmpdir):
     assert wf2.output_dir.exists()
 
 
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.flaky(reruns=3)
 def test_wf_nostate_runtwice_usecache(plugin, tmpdir):
     """
     running worflow (without state) twice,
@@ -2545,8 +3501,10 @@ def test_wf_nostate_runtwice_usecache(plugin, tmpdir):
     wf1.inputs.y = 3
     wf1.plugin = plugin
 
+    t0 = time.time()
     with Submitter(plugin=plugin) as sub:
         sub(wf1)
+    t1 = time.time() - t0
 
     results1 = wf1.result()
     assert 8 == results1.output.out
@@ -2557,16 +3515,23 @@ def test_wf_nostate_runtwice_usecache(plugin, tmpdir):
     cache_dir_content = os.listdir(wf1.cache_dir)
 
     # running workflow the second time
+    t0 = time.time()
     with Submitter(plugin=plugin) as sub:
         sub(wf1)
+    t2 = time.time() - t0
 
     results1 = wf1.result()
     assert 8 == results1.output.out
-    # checking if no new directory is not created
+    # checking if no new directory is created
     assert cache_dir_content == os.listdir(wf1.cache_dir)
 
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
-@pytest.mark.parametrize("plugin", Plugins)
+
 def test_wf_state_runtwice_usecache(plugin, tmpdir):
     """
     running worflow with a state twice,
@@ -2583,8 +3548,10 @@ def test_wf_state_runtwice_usecache(plugin, tmpdir):
     wf1.inputs.y = [3, 30]
     wf1.plugin = plugin
 
+    t0 = time.time()
     with Submitter(plugin=plugin) as sub:
         sub(wf1)
+    t1 = time.time() - t0
 
     results1 = wf1.result()
     assert 8 == results1[0].output.out
@@ -2597,14 +3564,21 @@ def test_wf_state_runtwice_usecache(plugin, tmpdir):
     cache_dir_content = os.listdir(wf1.cache_dir)
 
     # running workflow the second time
+    t0 = time.time()
     with Submitter(plugin=plugin) as sub:
         sub(wf1)
+    t2 = time.time() - t0
 
     results1 = wf1.result()
     assert 8 == results1[0].output.out
     assert 602 == results1[1].output.out
-    # checking if no new directory is not created
+    # checking if no new directory is created
     assert cache_dir_content == os.listdir(wf1.cache_dir)
+    # for win and dask/slurm the time for dir creation etc. might take much longer
+    if not sys.platform.startswith("win") and plugin == "cf":
+        # checking the execution time
+        assert t1 > 2
+        assert t2 < max(1, t1 - 1)
 
 
 @pytest.fixture
@@ -2661,11 +3635,11 @@ def test_workflow_combine1(tmpdir):
         }
     )
     wf1.cache_dir = tmpdir
-    result = wf1(plugin="cf")
+    result = wf1()
 
     assert result.output.out_pow == [1, 1, 4, 8]
     assert result.output.out_iden1 == [[1, 4], [1, 8]]
-    assert result.output.out_iden2 == [[[1, 4], [1, 8]]]
+    assert result.output.out_iden2 == [[1, 4], [1, 8]]
 
 
 def test_workflow_combine2(tmpdir):
@@ -2676,17 +3650,16 @@ def test_workflow_combine2(tmpdir):
     wf1.add(identity(name="identity", x=wf1.power.lzout.out).combine("power.b"))
     wf1.set_output({"out_pow": wf1.power.lzout.out, "out_iden": wf1.identity.lzout.out})
     wf1.cache_dir = tmpdir
-    result = wf1(plugin="cf")
+    result = wf1()
 
     assert result.output.out_pow == [[1, 4], [1, 8]]
-    assert result.output.out_iden == [[[1, 4], [1, 8]]]
+    assert result.output.out_iden == [[1, 4], [1, 8]]
 
 
 # testing lzout.all to collect all of the results and let FunctionTask deal with it
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_lzoutall_1(plugin):
+def test_wf_lzoutall_1(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         passing entire result object to add2_sub2_res function
         by using lzout.all syntax
@@ -2697,7 +3670,7 @@ def test_wf_lzoutall_1(plugin):
     wf.set_output([("out", wf.add_sub.lzout.out_add)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -2707,8 +3680,7 @@ def test_wf_lzoutall_1(plugin):
     assert 8 == results.output.out
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_lzoutall_1a(plugin):
+def test_wf_lzoutall_1a(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         passing entire result object to add2_res function
         by using lzout.all syntax in the node connections and for wf output
@@ -2719,7 +3691,7 @@ def test_wf_lzoutall_1a(plugin):
     wf.set_output([("out_all", wf.add_sub.lzout.all_)])
     wf.inputs.x = 2
     wf.inputs.y = 3
-    wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -2729,8 +3701,7 @@ def test_wf_lzoutall_1a(plugin):
     assert results.output.out_all == {"out_add": 8, "out_sub": 4}
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_lzoutall_st_1(plugin):
+def test_wf_lzoutall_st_1(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         passing entire result object to add2_res function
         by using lzout.all syntax
@@ -2742,6 +3713,7 @@ def test_wf_lzoutall_st_1(plugin):
     wf.inputs.x = [2, 20]
     wf.inputs.y = [3, 30]
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -2751,8 +3723,7 @@ def test_wf_lzoutall_st_1(plugin):
     assert results.output.out_add == [8, 62, 62, 602]
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_lzoutall_st_1a(plugin):
+def test_wf_lzoutall_st_1a(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         passing entire result object to add2_res function
         by using lzout.all syntax
@@ -2764,6 +3735,7 @@ def test_wf_lzoutall_st_1a(plugin):
     wf.inputs.x = [2, 20]
     wf.inputs.y = [3, 30]
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -2778,8 +3750,7 @@ def test_wf_lzoutall_st_1a(plugin):
     ]
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_lzoutall_st_2(plugin):
+def test_wf_lzoutall_st_2(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         passing entire result object to add2_res function
         by using lzout.all syntax
@@ -2793,6 +3764,7 @@ def test_wf_lzoutall_st_2(plugin):
     wf.inputs.x = [2, 20]
     wf.inputs.y = [3, 30]
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -2803,8 +3775,7 @@ def test_wf_lzoutall_st_2(plugin):
     assert results.output.out_add[1] == [62, 602]
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_lzoutall_st_2a(plugin):
+def test_wf_lzoutall_st_2a(plugin, tmpdir):
     """ workflow with 2 tasks, no splitter
         passing entire result object to add2_res function
         by using lzout.all syntax
@@ -2818,6 +3789,7 @@ def test_wf_lzoutall_st_2a(plugin):
     wf.inputs.x = [2, 20]
     wf.inputs.y = [3, 30]
     wf.plugin = plugin
+    wf.cache_dir = tmpdir
 
     with Submitter(plugin=plugin) as sub:
         sub(wf)
@@ -2833,10 +3805,9 @@ def test_wf_lzoutall_st_2a(plugin):
 # worfklows that have files in the result, the files should be copied to the wf dir
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_resultfile_1(plugin):
+def test_wf_resultfile_1(plugin, tmpdir):
     """ workflow with a file in the result, file should be copied to the wf dir"""
-    wf = Workflow(name="wf_file_1", input_spec=["x"])
+    wf = Workflow(name="wf_file_1", input_spec=["x"], cache_dir=tmpdir)
     wf.add(fun_write_file(name="writefile", filename=wf.lzin.x))
     wf.inputs.x = "file_1.txt"
     wf.plugin = plugin
@@ -2851,12 +3822,11 @@ def test_wf_resultfile_1(plugin):
     assert results.output.wf_out == wf.output_dir / "file_1.txt"
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_resultfile_2(plugin):
+def test_wf_resultfile_2(plugin, tmpdir):
     """ workflow with a list of files in the wf result,
         all files should be copied to the wf dir
     """
-    wf = Workflow(name="wf_file_1", input_spec=["x"])
+    wf = Workflow(name="wf_file_1", input_spec=["x"], cache_dir=tmpdir)
     wf.add(fun_write_file_list(name="writefile", filename_list=wf.lzin.x))
     file_list = ["file_1.txt", "file_2.txt", "file_3.txt"]
     wf.inputs.x = file_list
@@ -2873,12 +3843,11 @@ def test_wf_resultfile_2(plugin):
         assert file == wf.output_dir / file_list[ii]
 
 
-@pytest.mark.parametrize("plugin", Plugins)
-def test_wf_resultfile_3(plugin):
+def test_wf_resultfile_3(plugin, tmpdir):
     """ workflow with a dictionaries of files in the wf result,
         all files should be copied to the wf dir
     """
-    wf = Workflow(name="wf_file_1", input_spec=["x"])
+    wf = Workflow(name="wf_file_1", input_spec=["x"], cache_dir=tmpdir)
     wf.add(fun_write_file_list2dict(name="writefile", filename_list=wf.lzin.x))
     file_list = ["file_1.txt", "file_2.txt", "file_3.txt"]
     wf.inputs.x = file_list
@@ -2897,3 +3866,657 @@ def test_wf_resultfile_3(plugin):
             assert val.exists()
             ii = int(key.split("_")[1])
             assert val == wf.output_dir / file_list[ii]
+
+
+def test_wf_upstream_error1(plugin, tmpdir):
+    """ workflow with two tasks, task2 dependent on an task1 which raised an error"""
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = "hi"  # TypeError for adding str and int
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.set_output([("out", wf.addvar2.lzout.out)])
+
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+
+
+def test_wf_upstream_error2(plugin, tmpdir):
+    """ task2 dependent on task1, task1 errors, workflow-level split on task 1
+        goal - workflow finish running, one output errors but the other doesn't
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = [1, "hi"]  # TypeError for adding str and int
+    wf.split("x")  # workflow-level split
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.set_output([("out", wf.addvar2.lzout.out)])
+
+    with pytest.raises(Exception) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+
+
+def test_wf_upstream_error3(plugin, tmpdir):
+    """ task2 dependent on task1, task1 errors, task-level split on task 1
+        goal - workflow finish running, one output errors but the other doesn't
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = [1, "hi"]  # TypeError for adding str and int
+    wf.addvar1.split("a")  # task-level split
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.set_output([("out", wf.addvar2.lzout.out)])
+
+    with pytest.raises(Exception) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+
+
+def test_wf_upstream_error4(plugin, tmpdir):
+    """ workflow with one task, which raises an error"""
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = "hi"  # TypeError for adding str and int
+    wf.plugin = plugin
+    wf.set_output([("out", wf.addvar1.lzout.out)])
+
+    with pytest.raises(Exception) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "raised an error" in str(excinfo.value)
+    assert "addvar1" in str(excinfo.value)
+
+
+def test_wf_upstream_error5(plugin, tmpdir):
+    """ nested workflow with one task, which raises an error"""
+    wf_main = Workflow(name="wf_main", input_spec=["x"], cache_dir=tmpdir)
+    wf = Workflow(name="wf", input_spec=["x"], x=wf_main.lzin.x)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.plugin = plugin
+    wf.set_output([("wf_out", wf.addvar1.lzout.out)])
+
+    wf_main.add(wf)
+    wf_main.inputs.x = "hi"  # TypeError for adding str and int
+    wf_main.set_output([("out", wf_main.wf.lzout.wf_out)])
+
+    with pytest.raises(Exception) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf_main)
+
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+
+
+def test_wf_upstream_error6(plugin, tmpdir):
+    """ nested workflow with two tasks, the first one raises an error"""
+    wf_main = Workflow(name="wf_main", input_spec=["x"], cache_dir=tmpdir)
+    wf = Workflow(name="wf", input_spec=["x"], x=wf_main.lzin.x)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.plugin = plugin
+    wf.set_output([("wf_out", wf.addvar2.lzout.out)])
+
+    wf_main.add(wf)
+    wf_main.inputs.x = "hi"  # TypeError for adding str and int
+    wf_main.set_output([("out", wf_main.wf.lzout.wf_out)])
+
+    with pytest.raises(Exception) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf_main)
+
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+
+
+def test_wf_upstream_error7(plugin, tmpdir):
+    """
+    workflow with three sequential tasks, the first task raises an error
+    the last task is set as the workflow output
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = "hi"  # TypeError for adding str and int
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.add(fun_addvar_default(name="addvar3", a=wf.addvar2.lzout.out))
+    wf.set_output([("out", wf.addvar3.lzout.out)])
+
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+    assert wf.addvar1._errored is True
+    assert wf.addvar2._errored == wf.addvar3._errored == ["addvar1"]
+
+
+def test_wf_upstream_error7a(plugin, tmpdir):
+    """
+    workflow with three sequential tasks, the first task raises an error
+    the second task is set as the workflow output
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = "hi"  # TypeError for adding str and int
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.add(fun_addvar_default(name="addvar3", a=wf.addvar2.lzout.out))
+    wf.set_output([("out", wf.addvar2.lzout.out)])
+
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+    assert wf.addvar1._errored is True
+    assert wf.addvar2._errored == wf.addvar3._errored == ["addvar1"]
+
+
+def test_wf_upstream_error7b(plugin, tmpdir):
+    """
+    workflow with three sequential tasks, the first task raises an error
+    the second and the third tasks are set as the workflow output
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = "hi"  # TypeError for adding str and int
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.add(fun_addvar_default(name="addvar3", a=wf.addvar2.lzout.out))
+    wf.set_output([("out1", wf.addvar2.lzout.out), ("out2", wf.addvar3.lzout.out)])
+
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+    assert wf.addvar1._errored is True
+    assert wf.addvar2._errored == wf.addvar3._errored == ["addvar1"]
+
+
+def test_wf_upstream_error8(plugin, tmpdir):
+    """ workflow with three tasks, the first one raises an error, so 2 others are removed"""
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = "hi"  # TypeError for adding str and int
+    wf.plugin = plugin
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addvar1.lzout.out))
+    wf.add(fun_addtwo(name="addtwo", a=wf.addvar1.lzout.out))
+    wf.set_output([("out1", wf.addvar2.lzout.out), ("out2", wf.addtwo.lzout.out)])
+
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+
+    assert "addvar1" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+    assert wf.addvar1._errored is True
+    assert wf.addvar2._errored == wf.addtwo._errored == ["addvar1"]
+
+
+def test_wf_upstream_error9(plugin, tmpdir):
+    """
+    workflow with five tasks with two "branches",
+    one branch has an error, the second is fine
+    the errored branch is connected to the workflow output
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = 2
+    wf.add(fun_addvar(name="err", a=wf.addvar1.lzout.out, b="hi"))
+    wf.add(fun_addvar_default(name="follow_err", a=wf.err.lzout.out))
+
+    wf.add(fun_addtwo(name="addtwo", a=wf.addvar1.lzout.out))
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addtwo.lzout.out))
+    wf.set_output([("out1", wf.follow_err.lzout.out)])
+
+    wf.plugin = plugin
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "err" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+    assert wf.err._errored is True
+    assert wf.follow_err._errored == ["err"]
+
+
+def test_wf_upstream_error9a(plugin, tmpdir):
+    """
+    workflow with five tasks with two "branches",
+    one branch has an error, the second is fine
+    the branch without error is connected to the workflow output
+    so the workflow finished clean
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = 2
+    wf.add(fun_addvar(name="err", a=wf.addvar1.lzout.out, b="hi"))
+    wf.add(fun_addvar_default(name="follow_err", a=wf.err.lzout.out))
+
+    wf.add(fun_addtwo(name="addtwo", a=wf.addvar1.lzout.out))
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addtwo.lzout.out))
+    wf.set_output([("out1", wf.addvar2.lzout.out)])  # , ("out2", wf.addtwo.lzout.out)])
+
+    wf.plugin = plugin
+    with Submitter(plugin=plugin) as sub:
+        sub(wf)
+    assert wf.err._errored is True
+    assert wf.follow_err._errored == ["err"]
+
+
+def test_wf_upstream_error9b(plugin, tmpdir):
+    """
+    workflow with five tasks with two "branches",
+    one branch has an error, the second is fine
+    both branches are connected to the workflow output
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wf.add(fun_addvar_default(name="addvar1", a=wf.lzin.x))
+    wf.inputs.x = 2
+    wf.add(fun_addvar(name="err", a=wf.addvar1.lzout.out, b="hi"))
+    wf.add(fun_addvar_default(name="follow_err", a=wf.err.lzout.out))
+
+    wf.add(fun_addtwo(name="addtwo", a=wf.addvar1.lzout.out))
+    wf.add(fun_addvar_default(name="addvar2", a=wf.addtwo.lzout.out))
+    wf.set_output([("out1", wf.follow_err.lzout.out), ("out2", wf.addtwo.lzout.out)])
+
+    wf.plugin = plugin
+    with pytest.raises(ValueError) as excinfo:
+        with Submitter(plugin=plugin) as sub:
+            sub(wf)
+    assert "err" in str(excinfo.value)
+    assert "raised an error" in str(excinfo.value)
+    assert wf.err._errored is True
+    assert wf.follow_err._errored == ["err"]
+
+
+def exporting_graphs(wf, name):
+    """ helper function to run dot to create png/pdf files from dotfiles"""
+    # exporting the simple graph
+    dotfile_pr, formatted_dot = wf.create_dotfile(export=True, name=name)
+    assert len(formatted_dot) == 1
+    assert formatted_dot[0] == dotfile_pr.with_suffix(".png")
+    assert formatted_dot[0].exists()
+    print("\n png of a simple graph in: ", formatted_dot[0])
+    # exporting nested graph
+    dotfile_pr, formatted_dot = wf.create_dotfile(
+        type="nested", export=["pdf", "png"], name=f"{name}_nest"
+    )
+    assert len(formatted_dot) == 2
+    assert formatted_dot[0] == dotfile_pr.with_suffix(".pdf")
+    assert formatted_dot[0].exists()
+    print("\n pdf of the nested graph in: ", formatted_dot[0])
+    # detailed graph
+    dotfile_pr, formatted_dot = wf.create_dotfile(
+        type="detailed", export="pdf", name=f"{name}_det"
+    )
+    assert len(formatted_dot) == 1
+    assert formatted_dot[0] == dotfile_pr.with_suffix(".pdf")
+    assert formatted_dot[0].exists()
+    print("\n pdf of the detailed graph in: ", formatted_dot[0])
+
+
+def test_graph_1(tmpdir):
+    """creating a set of graphs, wf with two nodes"""
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wf.add(multiply(name="mult_1", x=wf.lzin.x, y=wf.lzin.y))
+    wf.add(multiply(name="mult_2", x=wf.lzin.x, y=wf.lzin.x))
+    wf.add(add2(name="add2", x=wf.mult_1.lzout.out))
+    wf.set_output([("out", wf.add2.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult_1" in dotstr_s_lines
+    assert "mult_2" in dotstr_s_lines
+    assert "add2" in dotstr_s_lines
+    assert "mult_1 -> add2" in dotstr_s_lines
+
+    # nested graph (should have the same elements)
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    assert "mult_1" in dotstr_n_lines
+    assert "mult_2" in dotstr_n_lines
+    assert "add2" in dotstr_n_lines
+    assert "mult_1 -> add2" in dotstr_n_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_mult_1:out -> struct_add2:x;" in dotstr_d_lines
+
+    # exporting graphs if dot available
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_1st(tmpdir):
+    """creating a set of graphs, wf with two nodes
+    some nodes have splitters, should be marked with blue color
+    """
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wf.add(multiply(name="mult_1", x=wf.lzin.x, y=wf.lzin.y).split("x"))
+    wf.add(multiply(name="mult_2", x=wf.lzin.x, y=wf.lzin.x))
+    wf.add(add2(name="add2", x=wf.mult_1.lzout.out))
+    wf.set_output([("out", wf.add2.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult_1 [color=blue]" in dotstr_s_lines
+    assert "mult_2" in dotstr_s_lines
+    assert "add2 [color=blue]" in dotstr_s_lines
+    assert "mult_1 -> add2 [color=blue]" in dotstr_s_lines
+
+    # nested graph
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    assert "mult_1 [color=blue]" in dotstr_n_lines
+    assert "mult_2" in dotstr_n_lines
+    assert "add2 [color=blue]" in dotstr_n_lines
+    assert "mult_1 -> add2 [color=blue]" in dotstr_n_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_mult_1:out -> struct_add2:x;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_1st_cmb(tmpdir):
+    """creating a set of graphs, wf with three nodes
+    the first one has a splitter, the second has a combiner, so the third one is stateless
+    first two nodes should be blue and the arrow between them should be blue
+    """
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split("x"))
+    wf.add(add2(name="add2", x=wf.mult.lzout.out).combine("mult.x"))
+    wf.add(list_sum(name="sum", x=wf.add2.lzout.out))
+    wf.set_output([("out", wf.sum.lzout.out)])
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult [color=blue]" in dotstr_s_lines
+    assert "add2 [color=blue]" in dotstr_s_lines
+    assert "sum" in dotstr_s_lines
+    assert "mult -> add2 [color=blue]" in dotstr_s_lines
+    assert "add2 -> sum" in dotstr_s_lines
+
+    # nested graph
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    assert "mult [color=blue]" in dotstr_n_lines
+    assert "add2 [color=blue]" in dotstr_n_lines
+    assert "sum" in dotstr_n_lines
+    assert "mult -> add2 [color=blue]" in dotstr_n_lines
+    assert "add2 -> sum" in dotstr_n_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_mult:out -> struct_add2:x;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_2(tmpdir):
+    """creating a graph, wf with one worfklow as a node"""
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.lzin.x)
+    wfnd.add(add2(name="add2", x=wfnd.lzin.x))
+    wfnd.set_output([("out", wfnd.add2.lzout.out)])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "wfnd [shape=box]" in dotstr_s_lines
+
+    # nested graph
+    dotfile = wf.create_dotfile(type="nested")
+    dotstr_lines = dotfile.read_text().split("\n")
+    assert "subgraph cluster_wfnd {" in dotstr_lines
+    assert "add2" in dotstr_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x}}"];' in dotstr_d_lines
+    )
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_2st(tmpdir):
+    """creating a set of graphs, wf with one worfklow as a node
+    the inner workflow has a state, so should be blue
+    """
+    wf = Workflow(name="wf", input_spec=["x"], cache_dir=tmpdir)
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.lzin.x).split("x")
+    wfnd.add(add2(name="add2", x=wfnd.lzin.x))
+    wfnd.set_output([("out", wfnd.add2.lzout.out)])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "wfnd [shape=box, color=blue]" in dotstr_s_lines
+
+    # nested graph
+    dotfile_s = wf.create_dotfile(type="nested")
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "subgraph cluster_wfnd {" in dotstr_s_lines
+    assert "color=blue" in dotstr_s_lines
+    assert "add2" in dotstr_s_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x}}"];' in dotstr_d_lines
+    )
+    assert "struct_wfnd:out -> struct_wf_out:out;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_3(tmpdir):
+    """creating a set of graphs, wf with two nodes (one node is a workflow)"""
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
+
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.mult.lzout.out)
+    wfnd.add(add2(name="add2", x=wfnd.lzin.x))
+    wfnd.set_output([("out", wfnd.add2.lzout.out)])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult" in dotstr_s_lines
+    assert "wfnd [shape=box]" in dotstr_s_lines
+    assert "mult -> wfnd" in dotstr_s_lines
+
+    # nested graph
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    assert "mult" in dotstr_n_lines
+    assert "subgraph cluster_wfnd {" in dotstr_n_lines
+    assert "add2" in dotstr_n_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_mult:out -> struct_wfnd:x;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_3st(tmpdir):
+    """creating a set of graphs, wf with two nodes (one node is a workflow)
+       the first node has a state and it should be passed to the second node
+       (blue node and a wfasnd, and blue arrow from the node to the wfasnd)
+    """
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y).split("x"))
+
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.mult.lzout.out)
+    wfnd.add(add2(name="add2", x=wfnd.lzin.x))
+    wfnd.set_output([("out", wfnd.add2.lzout.out)])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult [color=blue]" in dotstr_s_lines
+    assert "wfnd [shape=box, color=blue]" in dotstr_s_lines
+    assert "mult -> wfnd [color=blue]" in dotstr_s_lines
+
+    # nested graph
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    assert "mult [color=blue]" in dotstr_n_lines
+    assert "subgraph cluster_wfnd {" in dotstr_n_lines
+    assert "add2" in dotstr_n_lines
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_mult:out -> struct_wfnd:x;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_4(tmpdir):
+    """creating a set of graphs, wf with two nodes (one node is a workflow with two nodes
+    inside). Connection from the node to the inner workflow.
+    """
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wf.add(multiply(name="mult", x=wf.lzin.x, y=wf.lzin.y))
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.mult.lzout.out)
+    wfnd.add(add2(name="add2_a", x=wfnd.lzin.x))
+    wfnd.add(add2(name="add2_b", x=wfnd.add2_a.lzout.out))
+    wfnd.set_output([("out", wfnd.add2_b.lzout.out)])
+    wf.add(wfnd)
+    wf.set_output([("out", wf.wfnd.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult" in dotstr_s_lines
+    assert "wfnd [shape=box]" in dotstr_s_lines
+    assert "mult -> wfnd" in dotstr_s_lines
+
+    # nested graph
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    for el in ["mult", "add2_a", "add2_b"]:
+        assert el in dotstr_n_lines
+    assert "subgraph cluster_wfnd {" in dotstr_n_lines
+    assert "add2_a -> add2_b" in dotstr_n_lines
+    assert "mult -> add2_a [lhead=cluster_wfnd]"
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_wf:y -> struct_mult:y;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)
+
+
+def test_graph_5(tmpdir):
+    """creating a set of graphs, wf with two nodes (one node is a workflow with two nodes
+    inside). Connection from the inner workflow to the node.
+    """
+    wf = Workflow(name="wf", input_spec=["x", "y"], cache_dir=tmpdir)
+    wfnd = Workflow(name="wfnd", input_spec=["x"], x=wf.lzin.x)
+    wfnd.add(add2(name="add2_a", x=wfnd.lzin.x))
+    wfnd.add(add2(name="add2_b", x=wfnd.add2_a.lzout.out))
+    wfnd.set_output([("out", wfnd.add2_b.lzout.out)])
+    wf.add(wfnd)
+    wf.add(multiply(name="mult", x=wf.wfnd.lzout.out, y=wf.lzin.y))
+    wf.set_output([("out", wf.mult.lzout.out)])
+
+    # simple graph
+    dotfile_s = wf.create_dotfile()
+    dotstr_s_lines = dotfile_s.read_text().split("\n")
+    assert "mult" in dotstr_s_lines
+    assert "wfnd [shape=box]" in dotstr_s_lines
+    assert "wfnd -> mult" in dotstr_s_lines
+
+    # nested graph
+    dotfile_n = wf.create_dotfile(type="nested")
+    dotstr_n_lines = dotfile_n.read_text().split("\n")
+    for el in ["mult", "add2_a", "add2_b"]:
+        assert el in dotstr_n_lines
+    assert "subgraph cluster_wfnd {" in dotstr_n_lines
+    assert "add2_a -> add2_b" in dotstr_n_lines
+    assert "add2_b -> mult [ltail=cluster_wfnd]"
+
+    # detailed graph
+    dotfile_d = wf.create_dotfile(type="detailed")
+    dotstr_d_lines = dotfile_d.read_text().split("\n")
+    assert (
+        'struct_wf [color=red, label="{WORKFLOW INPUT: | {<x> x | <y> y}}"];'
+        in dotstr_d_lines
+    )
+    assert "struct_wf:x -> struct_wfnd:x;" in dotstr_d_lines
+
+    if DOT_FLAG:
+        name = f"graph_{sys._getframe().f_code.co_name}"
+        exporting_graphs(wf=wf, name=name)

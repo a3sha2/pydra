@@ -1,26 +1,15 @@
-# -*- coding: utf-8 -*-
-
-import os, shutil
-import subprocess as sp
+import os
 import pytest
 import attr
 
 from ..task import DockerTask, ShellCommandTask
 from ..submitter import Submitter
 from ..core import Workflow
-from ..specs import ShellOutSpec, SpecInfo, File, DockerSpec
-
-if bool(shutil.which("sbatch")):
-    Plugins = ["cf", "slurm"]
-else:
-    Plugins = ["cf"]
-
-need_docker = pytest.mark.skipif(
-    shutil.which("docker") is None or sp.call(["docker", "info"]),
-    reason="no docker within the container",
-)
+from ..specs import ShellOutSpec, SpecInfo, File, DockerSpec, ShellSpec
+from .utils import no_win, need_docker
 
 
+@no_win
 @need_docker
 def test_docker_1_nosubm():
     """ simple command in a container, a default bindings and working directory is added
@@ -42,8 +31,8 @@ def test_docker_1_nosubm():
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_1(plugin):
     """ simple command in a container, a default bindings and working directory is added
         using submitter
@@ -61,8 +50,8 @@ def test_docker_1(plugin):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_1_dockerflag(plugin):
     """ simple command in a container, a default bindings and working directory is added
         using ShellComandTask with container_info=("docker", image)
@@ -82,8 +71,8 @@ def test_docker_1_dockerflag(plugin):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_1_dockerflag_exception(plugin):
     """using ShellComandTask with container_info=("docker"), no image provided"""
     cmd = "whoami"
@@ -94,6 +83,7 @@ def test_docker_1_dockerflag_exception(plugin):
     assert "container_info has to have 2 or 3 elements" in str(excinfo.value)
 
 
+@no_win
 @need_docker
 def test_docker_2_nosubm():
     """ a command with arguments, cmd and args given as executable
@@ -113,8 +103,8 @@ def test_docker_2_nosubm():
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_2(plugin):
     """ a command with arguments, cmd and args given as executable
         using submitter
@@ -135,8 +125,8 @@ def test_docker_2(plugin):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_2_dockerflag(plugin):
     """ a command with arguments, cmd and args given as executable
         using ShellComandTask with container_info=("docker", image)
@@ -159,6 +149,7 @@ def test_docker_2_dockerflag(plugin):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
 def test_docker_2a_nosubm():
     """ a command with arguments, using executable and args
@@ -183,8 +174,8 @@ def test_docker_2a_nosubm():
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_2a(plugin):
     """ a command with arguments, using executable and args
         using submitter
@@ -210,8 +201,8 @@ def test_docker_2a(plugin):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_3(plugin, tmpdir):
     """ a simple command in container with bindings,
         creating directory in tmp dir and checking if it is in the container
@@ -233,8 +224,8 @@ def test_docker_3(plugin, tmpdir):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_3_dockerflag(plugin, tmpdir):
     """ a simple command in container with bindings,
         creating directory in tmp dir and checking if it is in the container
@@ -259,8 +250,8 @@ def test_docker_3_dockerflag(plugin, tmpdir):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_3_dockerflagbind(plugin, tmpdir):
     """ a simple command in container with bindings,
         creating directory in tmp dir and checking if it is in the container
@@ -285,8 +276,8 @@ def test_docker_3_dockerflagbind(plugin, tmpdir):
         assert "Unable to find image" in res.output.stderr
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_4(plugin, tmpdir):
     """ task reads the file that is bounded to the container
         specifying bindings,
@@ -311,8 +302,8 @@ def test_docker_4(plugin, tmpdir):
     assert res.output.return_code == 0
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_4_dockerflag(plugin, tmpdir):
     """ task reads the file that is bounded to the container
         specifying bindings,
@@ -340,8 +331,8 @@ def test_docker_4_dockerflag(plugin, tmpdir):
 # tests with State
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_st_1(plugin):
     """ commands without arguments in container
         splitter = executable
@@ -364,8 +355,8 @@ def test_docker_st_1(plugin):
     assert res[0].output.return_code == res[1].output.return_code == 0
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_st_2(plugin):
     """ command with arguments in docker, checking the distribution
         splitter = image
@@ -388,8 +379,8 @@ def test_docker_st_2(plugin):
     assert res[0].output.return_code == res[1].output.return_code == 0
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_st_3(plugin):
     """ outer splitter image and executable
     """
@@ -406,8 +397,8 @@ def test_docker_st_3(plugin):
     assert "Ubuntu" in res[3].output.stdout
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_st_4(plugin):
     """ outer splitter image and executable, combining with images
     """
@@ -448,8 +439,8 @@ def test_docker_st_4(plugin):
 # tests with workflows
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_wf_docker_1(plugin, tmpdir):
     """ a workflow with two connected task
         the first one read the file that is bounded to the container,
@@ -492,8 +483,8 @@ def test_wf_docker_1(plugin, tmpdir):
     assert res.output.out == "message from the previous task: hello from pydra"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_wf_docker_1_dockerflag(plugin, tmpdir):
     """ a workflow with two connected task
         the first one read the file that is bounded to the container,
@@ -532,8 +523,8 @@ def test_wf_docker_1_dockerflag(plugin, tmpdir):
     assert res.output.out == "message from the previous task: hello from pydra"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_wf_docker_2pre(plugin, tmpdir):
     """ a workflow with two connected task that run python scripts
         the first one creates a text file and the second one reads the file
@@ -553,8 +544,8 @@ def test_wf_docker_2pre(plugin, tmpdir):
     assert res.output.stdout == "/outputs/tmp.txt"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_wf_docker_2(plugin, tmpdir):
     """ a workflow with two connected task that run python scripts
         the first one creates a text file and the second one reads the file
@@ -593,8 +584,8 @@ def test_wf_docker_2(plugin, tmpdir):
     assert res.output.out == "Hello!"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_wf_docker_3(plugin, tmpdir):
     """ a workflow with two connected task
         the first one read the file that contains the name of the image,
@@ -636,8 +627,8 @@ def test_wf_docker_3(plugin, tmpdir):
 # tests with customized output_spec
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_outputspec_1(plugin, tmpdir):
     """
         customised output_spec, adding files to the output, providing specific pathname
@@ -664,9 +655,9 @@ def test_docker_outputspec_1(plugin, tmpdir):
 # tests with customised input_spec
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
-def test_docker_inputspec_1(plugin, tmpdir):
+def test_docker_inputspec_1(tmpdir):
     """ a simple customized input spec for docker task """
     filename = str(tmpdir.join("file_pydra.txt"))
     with open(filename, "w") as f:
@@ -684,6 +675,7 @@ def test_docker_inputspec_1(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
@@ -705,9 +697,9 @@ def test_docker_inputspec_1(plugin, tmpdir):
     assert res.output.stdout == "hello from pydra"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
-def test_docker_inputspec_1a(plugin, tmpdir):
+def test_docker_inputspec_1a(tmpdir):
     """ a simple customized input spec for docker task
         a default value is used
     """
@@ -725,7 +717,7 @@ def test_docker_inputspec_1a(plugin, tmpdir):
                 attr.ib(
                     type=File,
                     default=filename,
-                    metadata={"position": 1, "help_string": "input file"},
+                    metadata={"position": 1, "argstr": "", "help_string": "input file"},
                 ),
             )
         ],
@@ -744,8 +736,100 @@ def test_docker_inputspec_1a(plugin, tmpdir):
     assert res.output.stdout == "hello from pydra"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
+def test_docker_inputspec_1b(tmpdir):
+    """ a simple customized input spec for docker task
+        instead of using automatic binding I provide the bindings
+        and name of the file inside the container
+    """
+    filename = str(tmpdir.join("file_pydra.txt"))
+    with open(filename, "w") as f:
+        f.write("hello from pydra")
+
+    cmd = "cat"
+
+    my_input_spec = SpecInfo(
+        name="Input",
+        fields=[
+            (
+                "file",
+                attr.ib(
+                    type=File,
+                    metadata={
+                        "mandatory": True,
+                        "position": 1,
+                        "argstr": "",
+                        "help_string": "input file",
+                        "container_path": True,
+                    },
+                ),
+            )
+        ],
+        bases=(DockerSpec,),
+    )
+
+    docky = DockerTask(
+        name="docky",
+        image="busybox",
+        executable=cmd,
+        # container_path is set to True, so providing the filename inside the container
+        file="/in_container/file_pydra.txt",
+        bindings=[(str(tmpdir), "/in_container")],
+        input_spec=my_input_spec,
+        strip=True,
+    )
+
+    res = docky()
+    assert res.output.stdout == "hello from pydra"
+
+
+@no_win
+@need_docker
+def test_docker_inputspec_1_dockerflag(tmpdir):
+    """ a simple customized input spec for docker task
+        using ShellTask with container_info
+    """
+    filename = str(tmpdir.join("file_pydra.txt"))
+    with open(filename, "w") as f:
+        f.write("hello from pydra")
+
+    cmd = "cat"
+
+    my_input_spec = SpecInfo(
+        name="Input",
+        fields=[
+            (
+                "file",
+                attr.ib(
+                    type=File,
+                    metadata={
+                        "mandatory": True,
+                        "position": 1,
+                        "argstr": "",
+                        "help_string": "input file",
+                    },
+                ),
+            )
+        ],
+        bases=(ShellSpec,),
+    )
+
+    docky = ShellCommandTask(
+        name="docky",
+        executable=cmd,
+        file=filename,
+        input_spec=my_input_spec,
+        container_info=("docker", "busybox"),
+        strip=True,
+    )
+
+    res = docky()
+    assert res.output.stdout == "hello from pydra"
+
+
+@no_win
+@need_docker
 def test_docker_inputspec_2(plugin, tmpdir):
     """ a customized input spec with two fields for docker task """
     filename_1 = tmpdir.join("file_pydra.txt")
@@ -764,7 +848,12 @@ def test_docker_inputspec_2(plugin, tmpdir):
             (
                 "file1",
                 attr.ib(
-                    type=File, metadata={"position": 1, "help_string": "input file 1"}
+                    type=File,
+                    metadata={
+                        "position": 1,
+                        "argstr": "",
+                        "help_string": "input file 1",
+                    },
                 ),
             ),
             (
@@ -772,7 +861,11 @@ def test_docker_inputspec_2(plugin, tmpdir):
                 attr.ib(
                     type=File,
                     default=filename_2,
-                    metadata={"position": 2, "help_string": "input file 2"},
+                    metadata={
+                        "position": 2,
+                        "argstr": "",
+                        "help_string": "input file 2",
+                    },
                 ),
             ),
         ],
@@ -792,8 +885,8 @@ def test_docker_inputspec_2(plugin, tmpdir):
     assert res.output.stdout == "hello from pydra\nhave a nice one"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_inputspec_2a_except(plugin, tmpdir):
     """ a customized input spec with two fields
         first one uses a default, and second doesn't - raises a dataclass exception
@@ -816,13 +909,22 @@ def test_docker_inputspec_2a_except(plugin, tmpdir):
                 attr.ib(
                     type=File,
                     default=filename_1,
-                    metadata={"position": 1, "help_string": "input file 1"},
+                    metadata={
+                        "position": 1,
+                        "argstr": "",
+                        "help_string": "input file 1",
+                    },
                 ),
             ),
             (
                 "file2",
                 attr.ib(
-                    type=File, metadata={"position": 2, "help_string": "input file 2"}
+                    type=File,
+                    metadata={
+                        "position": 2,
+                        "argstr": "",
+                        "help_string": "input file 2",
+                    },
                 ),
             ),
         ],
@@ -843,8 +945,8 @@ def test_docker_inputspec_2a_except(plugin, tmpdir):
     assert res.output.stdout == "hello from pydra\nhave a nice one"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_inputspec_2a(plugin, tmpdir):
     """ a customized input spec with two fields
         first one uses a default value
@@ -868,13 +970,22 @@ def test_docker_inputspec_2a(plugin, tmpdir):
                 attr.ib(
                     type=File,
                     default=filename_1,
-                    metadata={"position": 1, "help_string": "input file 1"},
+                    metadata={
+                        "position": 1,
+                        "argstr": "",
+                        "help_string": "input file 1",
+                    },
                 ),
             ),
             (
                 "file2",
                 attr.ib(
-                    type=File, metadata={"position": 2, "help_string": "input file 2"}
+                    type=File,
+                    metadata={
+                        "position": 2,
+                        "argstr": "",
+                        "help_string": "input file 2",
+                    },
                 ),
             ),
         ],
@@ -894,8 +1005,9 @@ def test_docker_inputspec_2a(plugin, tmpdir):
     assert res.output.stdout == "hello from pydra\nhave a nice one"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
+@pytest.mark.xfail(reason="'docker' not in /proc/1/cgroup on ubuntu; TODO")
 def test_docker_inputspec_3(plugin, tmpdir):
     """ input file is in the container, so metadata["container_path"]: True,
         the input will be treated as a str """
@@ -913,6 +1025,7 @@ def test_docker_inputspec_3(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                         "container_path": True,
                     },
@@ -937,8 +1050,8 @@ def test_docker_inputspec_3(plugin, tmpdir):
     assert cmdline == docky.cmdline
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_inputspec_3a(plugin, tmpdir):
     """ input file does not exist in the local file system,
         but metadata["container_path"] is not used,
@@ -958,6 +1071,7 @@ def test_docker_inputspec_3a(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
@@ -980,8 +1094,8 @@ def test_docker_inputspec_3a(plugin, tmpdir):
     assert "use field.metadata['container_path']=True" in str(excinfo.value)
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_cmd_inputspec_copyfile_1(plugin, tmpdir):
     """ shelltask changes a file in place,
         adding copyfile=True to the file-input from input_spec
@@ -1002,6 +1116,7 @@ def test_docker_cmd_inputspec_copyfile_1(plugin, tmpdir):
                     type=File,
                     metadata={
                         "position": 1,
+                        "argstr": "",
                         "help_string": "orig file",
                         "mandatory": True,
                         "copyfile": True,
@@ -1035,15 +1150,15 @@ def test_docker_cmd_inputspec_copyfile_1(plugin, tmpdir):
     assert res.output.out_file.exists()
     # the file is  copied, and than it is changed in place
     assert res.output.out_file.parent == docky.output_dir
-    with open(res.output.out_file, "r") as f:
+    with open(res.output.out_file) as f:
         assert "hi from pydra\n" == f.read()
     # the original file is unchanged
-    with open(file, "r") as f:
+    with open(file) as f:
         assert "hello from pydra\n" == f.read()
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_inputspec_state_1(plugin, tmpdir):
     """ a customised input spec for a docker file with a splitter,
         splitter is on files
@@ -1068,6 +1183,7 @@ def test_docker_inputspec_state_1(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
@@ -1090,8 +1206,8 @@ def test_docker_inputspec_state_1(plugin, tmpdir):
     assert res[1].output.stdout == "have a nice one"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_inputspec_state_1b(plugin, tmpdir):
     """ a customised input spec for a docker file with a splitter,
         files from the input spec have the same path in the local os and the container,
@@ -1117,6 +1233,7 @@ def test_docker_inputspec_state_1b(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
@@ -1139,8 +1256,8 @@ def test_docker_inputspec_state_1b(plugin, tmpdir):
     assert res[1].output.stdout == "have a nice one"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_wf_inputspec_1(plugin, tmpdir):
     """ a customized input spec for workflow with docker tasks """
     filename = tmpdir.join("file_pydra.txt")
@@ -1159,6 +1276,7 @@ def test_docker_wf_inputspec_1(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
@@ -1190,8 +1308,8 @@ def test_docker_wf_inputspec_1(plugin, tmpdir):
     assert res.output.out == "hello from pydra"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_wf_state_inputspec_1(plugin, tmpdir):
     """ a customized input spec for workflow with docker tasks that has a state"""
     file_1 = tmpdir.join("file_pydra.txt")
@@ -1214,6 +1332,7 @@ def test_docker_wf_state_inputspec_1(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
@@ -1247,8 +1366,8 @@ def test_docker_wf_state_inputspec_1(plugin, tmpdir):
     assert res[1].output.out == "have a nice one"
 
 
+@no_win
 @need_docker
-@pytest.mark.parametrize("plugin", Plugins)
 def test_docker_wf_ndst_inputspec_1(plugin, tmpdir):
     """ a customized input spec for workflow with docker tasks with states"""
     file_1 = tmpdir.join("file_pydra.txt")
@@ -1271,6 +1390,7 @@ def test_docker_wf_ndst_inputspec_1(plugin, tmpdir):
                     metadata={
                         "mandatory": True,
                         "position": 1,
+                        "argstr": "",
                         "help_string": "input file",
                     },
                 ),
